@@ -24,6 +24,8 @@ pub struct RunData {
     pub calibrated: bool,
     pub timestamps_used: bool,
     pub stream_latency_ms: f64,
+    /// Median offset of the 4 count-in hits that opened the gate (latency seed), ms.
+    pub countin_latency_ms: Option<f64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -194,6 +196,7 @@ impl RunData {
             calibrated: bool,
             timestamps_used: bool,
             stream_latency_ms: f64,
+            countin_latency_ms: Option<f64>,
             grid: &'a [GridNote],
             onsets: &'a [Onset],
             worst_windows: &'a [Window],
@@ -210,6 +213,7 @@ impl RunData {
             calibrated: self.calibrated,
             timestamps_used: self.timestamps_used,
             stream_latency_ms: self.stream_latency_ms,
+            countin_latency_ms: self.countin_latency_ms,
             grid: &self.plan.notes,
             onsets,
             worst_windows: worst,
@@ -243,7 +247,7 @@ mod tests {
             })
             .collect();
         let samples = synth(48000.0, plan.total_seconds() + offset + 1.0, &hits, 2);
-        let run = RunData { pattern, plan, sample_rate: 48000, samples, grid_offset_s: offset, calibrated: false, timestamps_used: false, stream_latency_ms: 0.0 };
+        let run = RunData { pattern, plan, sample_rate: 48000, samples, grid_offset_s: offset, calibrated: false, timestamps_used: false, stream_latency_ms: 0.0, countin_latency_ms: None };
         let (rep, onsets) = run.analyse();
         assert!(rep.n_missed <= 4, "{}", rep.n_missed);
         for (n, g) in rep.notes.iter().zip(&run.plan.notes) {

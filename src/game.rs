@@ -7,6 +7,7 @@ use bevy::prelude::*;
 
 use crate::audio::{AudioEngine, ClickPlan, DeviceEntry, SAMPLE_RATE};
 use crate::config::Config;
+use crate::countin::CountInGate;
 use crate::detect::Onset;
 use crate::monitor::Chain;
 use crate::paint::Paint;
@@ -35,9 +36,17 @@ pub struct PlayState {
     pub delta_frames: f64,
     pub timestamps_used: bool,
     pub ended_early: Option<f64>,
+    /// Open-ended count-in; None once the player has caught 4 clicks in a row.
+    pub gate: Option<CountInGate>,
+    pub countin_seed_ms: Option<f64>,
+    last_gate_check: f64,
 }
 
 impl PlayState {
+    pub fn waiting(&self) -> bool {
+        self.gate.is_some()
+    }
+
     pub fn now(&self, engine: &AudioEngine) -> f64 {
         let f = engine.shared.out_frames.load(Ordering::Relaxed) as f64;
         (f - self.click_start_frame as f64) / f64::from(SAMPLE_RATE)
@@ -165,8 +174,9 @@ impl Game {
             self.message = Some("No audio engine - check Settings".into());
             return;
         };
-        let (count_in, seconds) = if calibration { (1, 8.0 * crate::patterns::bar_seconds(bpm)) } else { (self.cfg.count_in(), SCORED_SECONDS) };
-        let plan = SessionPlan::new(pattern, bpm, count_in, seconds);
+        let seconds = if calibration { 8.0 * crate::patterns::bar_seconds(bpm) } else { SCORED_SECONDS };
+        // Placeholder plan: the real count-in length is set when the count-in gate opens.
+        let plan = SessionPlan::new(pattern, bpm, 1, seconds);
         engine.start_recording();
         let sr = f64::from(SAMPLE_RATE);
         let start = engine.shared.out_frames.load(Ordering::Relaxed) + (0.4 * sr) as u64;
@@ -175,10 +185,14 @@ impl Game {
         engine.set_click(Some(ClickPlan {
             start_frame: start,
             frames_per_beat: beat_seconds(bpm) * sr,
-            beats: plan.total_beats(),
+            beats: u32::MAX / 4, // until the count-in gate opens
             beats_per_bar: BEATS_PER_BAR,
         }));
+        let allowance = if calibration { 0.0 } else { self.cfg.latency_ms.unwrap_or(0.0) / 1e3 };
         self.play = Some(PlayState {
+            gate: Some(CountInGate::new(beat_seconds(bpm), allowance)),
+            countin_seed_ms: None,
+            last_gate_check: 0.0,
             pattern,
             plan,
             calibration,
@@ -208,15 +222,54 @@ impl Game {
     /// Per-frame play logic: end the session after the last bar. No live analysis: the
     /// take is scored afterwards so the global input lag can be estimated over the whole run.
     pub fn tick_play(&mut self) {
-        let (Some(engine), Some(play)) = (&self.engine, &self.play) else { return };
+        let (Some(engine), Some(play)) = (&self.engine, &mut self.play) else { return };
+        let now = play.now(engine);
+        if play.gate.is_some() {
+            if now - play.last_gate_check < 0.05 {
+                return;
+            }
+            play.last_gate_check = now;
+            let sr = f64::from(SAMPLE_RATE);
+            let bpm = play.plan.bpm;
+            let onsets: Vec<f64> = {
+                let rec = engine.recording.lock().unwrap();
+                let n = rec.samples.len();
+                let a = n.saturating_sub((1.5 * sr) as usize);
+                let off = (play.click_start_frame as f64 + play.delta_frames - rec.start_frame as f64) / sr;
+                crate::countin::tail_onsets(&rec.samples[a..], sr, crate::patterns::sixteenth_seconds(bpm))
+                    .into_iter()
+                    .map(|t| t + a as f64 / sr - off)
+                    .collect()
+            };
+            if let Some(seed) = play.gate.as_mut().and_then(|g| g.update(&onsets, now)) {
+                // Start at the next bar line.
+                let bar = crate::patterns::bar_seconds(bpm);
+                let bars = ((now + 0.05) / bar).ceil().max(1.0) as u32;
+                let seconds = if play.calibration { 8.0 * bar } else { SCORED_SECONDS };
+                play.plan = SessionPlan::new(play.pattern, bpm, bars, seconds);
+                play.gate = None;
+                play.countin_seed_ms = Some(seed * 1e3);
+                engine.set_click(Some(ClickPlan {
+                    start_frame: play.click_start_frame,
+                    frames_per_beat: beat_seconds(bpm) * sr,
+                    beats: play.plan.total_beats(),
+                    beats_per_bar: BEATS_PER_BAR,
+                }));
+            }
+            return;
+        }
         let end = play.ended_early.unwrap_or(play.plan.total_seconds() + 0.3);
-        if play.now(engine) >= end {
+        if now >= end {
             self.finish_play();
         }
     }
 
     pub fn end_early(&mut self) {
         let (Some(engine), Some(play)) = (&self.engine, &mut self.play) else { return };
+        if play.waiting() {
+            self.abort_play();
+            return;
+        }
         let now = play.now(engine);
         let bar = crate::patterns::bar_seconds(play.plan.bpm);
         let start = play.plan.scoring_start();
@@ -249,6 +302,7 @@ impl Game {
             calibrated: calib.is_some(),
             timestamps_used: play.timestamps_used,
             stream_latency_ms: play.delta_frames / f64::from(SAMPLE_RATE) * 1e3,
+            countin_latency_ms: play.countin_seed_ms,
         };
         let (rep, onsets) = run.analyse();
         let worst = run.worst_windows(&rep, &onsets, 3);

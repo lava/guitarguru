@@ -1,6 +1,7 @@
 mod audio;
 mod auto;
 mod config;
+mod countin;
 mod detect;
 mod dsp;
 mod game;

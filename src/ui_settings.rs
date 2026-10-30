@@ -178,11 +178,6 @@ pub fn draw(g: &mut Game, p: &mut Paint) {
         }
         g.cfg.save();
     }
-    let d = stepper(p, x + 230.0, y, "count-in", &format!("{} bars", g.cfg.count_in()));
-    if d != 0 {
-        g.cfg.count_in_bars = Some((g.cfg.count_in() as i32 + d).clamp(1, 4) as u32);
-        g.cfg.save();
-    }
     let d = stepper(p, x + 16.0, y + 70.0, "buffer", &format!("{}", g.cfg.audio.buffer_frames));
     if d != 0 {
         let b = g.cfg.audio.buffer_frames;

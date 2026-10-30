@@ -17,39 +17,42 @@ pub fn draw(g: &mut Game, p: &mut Paint) {
     let total = play.plan.total_seconds();
     let start = play.plan.scoring_start();
 
-    // Thin progress line along the top edge.
-    let frac = ((t - start) / (total - start)).clamp(0.0, 1.0) as f32;
-    p.rect(0.0, 0.0, 1440.0, 3.0, col::PANEL);
-    p.rect(0.0, 0.0, 1440.0 * frac, 3.0, col::BRASS);
+    let waiting = play.waiting();
+    // Time left: a solid bar anchored at the right edge; its left edge moves right.
+    let left = if waiting || t < start { 1.0 } else { (1.0 - (t - start) / (total - start)).clamp(0.0, 1.0) as f32 };
+    p.rect(0.0, 0.0, 1440.0, 10.0, col::PANEL);
+    p.rect(1440.0 * (1.0 - left), 0.0, 1440.0 * left, 10.0, col::BRASS);
     let title = if play.calibration { "latency calibration".to_string() } else { format!("{}  {} BPM", play.pattern.name, bpm) };
-    p.text(32.0, 32.0, title, 18.0, col::DIM, Align::Left);
+    p.text(32.0, 40.0, title, 18.0, col::DIM, Align::Left);
 
     // ---------- metronome
     let beats = t / beat_s;
-    let (pvx, pvy, len) = (720.0, 70.0, 190.0);
-    let ang = if t >= 0.0 && t < total { 0.42 * (std::f64::consts::PI * beats).cos() as f32 } else { 0.42 };
-    let (bx, by) = (pvx + len * ang.sin(), pvy + len * ang.cos());
-    for o in [-1.0, 0.0, 1.0] {
-        p.line(pvx + o, pvy, bx + o, by, col::DIM);
-    }
-    p.disc(pvx, pvy, 5.0, col::DIM);
-    p.disc(bx, by, 14.0, col::TEXT);
+    let running = t >= 0.0 && (waiting || t < total);
+    metronome(p, 720.0, if running { beats } else { 0.5 }, bpm);
+    // Flash dot on each click, brass on beat 1.
     let cur_beat = beats.floor() as i64;
-    let phase = (beats - beats.floor()) as f32;
-    for k in 0..BEATS_PER_BAR as i64 {
-        let x = 720.0 + (k as f32 - 1.5) * 80.0;
-        let accent = k == 0;
-        let r = if accent { 20.0 } else { 14.0 };
-        let on = t >= 0.0 && t < total && cur_beat.rem_euclid(BEATS_PER_BAR as i64) == k;
-        let base = if accent { col::BRASS } else { col::TEXT };
-        let c = if on { dim(base, 1.0 - 0.75 * phase.min(1.0)) } else { col::LINE };
-        p.disc(x, 320.0, r, c);
+    let since = ((beats - beats.floor()) * beat_s) as f32;
+    let flash = if running { (-since / 0.09).exp() } else { 0.0 };
+    let base = if cur_beat.rem_euclid(BEATS_PER_BAR as i64) == 0 { col::BRASS } else { col::TEXT };
+    p.disc(720.0, 382.0, 13.0, col::PANEL2);
+    if flash > 0.02 {
+        p.disc(720.0, 382.0, 13.0, dim(base, flash.max(0.25)));
+    }
+    // Subtle count-in status: no accuracy feedback, just whether it is waiting.
+    if let Some(gate) = &play.gate {
+        p.text(560.0, 382.0, "play along to start", 14.0, col::FAINT, Align::Right);
+        for i in 0..crate::countin::NEEDED {
+            let c = if i < gate.streak() { col::DIM } else { col::PANEL2 };
+            p.disc(780.0 + i as f32 * 16.0, 382.0, 4.0, c);
+        }
+    } else if t < start {
+        p.text(560.0, 382.0, "starting next bar", 14.0, col::FAINT, Align::Right);
     }
 
     // ---------- pattern: stroke diagram
     let (nx, cell, top) = (80.0, 80.0, 420.0);
     let rel = t - start;
-    let in_count_in = rel < 0.0;
+    let in_count_in = waiting || rel < 0.0;
     let bar_idx = if in_count_in { 0 } else { (rel / bar_s).floor() as u32 };
     let bar_t0 = start + f64::from(bar_idx) * bar_s;
     let pos16 = ((t - bar_t0) / s16) as f32;
@@ -82,14 +85,51 @@ pub fn draw(g: &mut Game, p: &mut Paint) {
     if !in_count_in {
         let px = nx + pos16.clamp(0.0, 16.0) * cell;
         p.rect(px - 1.5, top + 30.0, 3.0, 190.0, col::BRASS);
-    } else if t >= 0.0 {
-        let n = cur_beat.rem_euclid(BEATS_PER_BAR as i64) + 1;
-        let last_bar = rel > -bar_s;
-        let c = if last_bar { col::BRASS } else { col::TEXT };
-        p.text(720.0, 372.0, format!("count-in  {n}"), 26.0, c, Align::Center);
-    } else {
-        p.text(720.0, 372.0, "get ready", 26.0, col::DIM, Align::Center);
     }
 
     p.text(720.0, 870.0, "Enter: end & score     Esc: abort", 13.0, col::FAINT, Align::Center);
+}
+
+/// Classical table metronome: pyramid wooden body, inverted pendulum arm with a sliding
+/// weight (lower = faster). The arm passes the centre on each click (one end-to-end swing
+/// per beat), so the extremes fall on the off-beat eighths.
+fn metronome(p: &mut Paint, cx: f32, beats: f64, bpm: u32) {
+    use bevy::color::Color;
+    let wood = Color::srgb(0.43, 0.26, 0.15);
+    let wood_dark = Color::srgb(0.29, 0.17, 0.09);
+    let face = Color::srgb(0.55, 0.36, 0.21);
+    let metal = Color::srgb(0.80, 0.78, 0.72);
+    let (top_y, bot_y) = (70.0, 330.0);
+    let (top_w, bot_w) = (64.0, 230.0);
+    // body as horizontal strips
+    let mut y = top_y;
+    while y < bot_y {
+        let f = (y - top_y) / (bot_y - top_y);
+        let w = top_w + (bot_w - top_w) * f;
+        p.rect(cx - w / 2.0, y, w, 2.0, wood);
+        let fw = (w - 34.0).max(0.0);
+        if y > top_y + 16.0 && y < bot_y - 34.0 {
+            p.rect(cx - fw / 2.0, y, fw, 2.0, face);
+        }
+        y += 2.0;
+    }
+    p.rect(cx - bot_w / 2.0 - 12.0, bot_y, bot_w + 24.0, 16.0, wood_dark);
+    p.rect(cx - top_w / 2.0 - 4.0, top_y - 8.0, top_w + 8.0, 10.0, wood_dark);
+    // tempo scale on the face
+    for k in 0..9 {
+        let yy = top_y + 40.0 + k as f32 * 22.0;
+        p.rect(cx - 7.0, yy, 14.0, 1.5, wood_dark);
+    }
+    // arm: inverted pendulum pivoting near the bottom
+    let (px, py, len) = (cx, bot_y - 46.0, 250.0);
+    let theta = 0.36 * (std::f64::consts::PI * beats).sin() as f32;
+    let dir = bevy::math::Vec2::new(theta.sin(), -theta.cos());
+    let mid = bevy::math::Vec2::new(px, py) + dir * (len / 2.0);
+    p.rot_rect(mid.x, mid.y, 6.0, len, -theta, metal);
+    // sliding weight: higher up for slower tempi
+    let d = len * (0.32 + 0.55 * (180.0 - bpm as f32).max(0.0) / 140.0);
+    let w = bevy::math::Vec2::new(px, py) + dir * d;
+    p.rot_rect(w.x, w.y, 36.0, 24.0, -theta, wood_dark);
+    p.rot_rect(w.x, w.y, 30.0, 18.0, -theta, metal);
+    p.disc(px, py, 7.0, wood_dark);
 }

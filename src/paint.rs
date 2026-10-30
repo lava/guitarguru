@@ -99,6 +99,10 @@ impl Paint {
     pub fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: Color) {
         self.shapes.push(ShapeCmd { shape: Shape::Rect, center: Vec2::new(x + w / 2.0, y + h / 2.0), size: Vec2::new(w, h), color, rot: 0.0 });
     }
+    /// Rectangle centred at (cx, cy), rotated by `rot` radians (counter-clockwise on screen).
+    pub fn rot_rect(&mut self, cx: f32, cy: f32, w: f32, h: f32, rot: f32, color: Color) {
+        self.shapes.push(ShapeCmd { shape: Shape::Rect, center: Vec2::new(cx, cy), size: Vec2::new(w, h), color, rot });
+    }
     /// Outline of width `t`.
     pub fn frame(&mut self, x: f32, y: f32, w: f32, h: f32, t: f32, color: Color) {
         self.rect(x, y, w, t, color);

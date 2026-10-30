@@ -13,6 +13,7 @@ pub struct Config {
     pub tone: ToneSettings,
     /// Manual latency calibration (tap along to clicks), ms; None = uncalibrated.
     pub latency_ms: Option<f64>,
+    /// Unused since the count-in became open-ended; kept so old config files load.
     pub count_in_bars: Option<u32>,
 }
 
@@ -29,8 +30,5 @@ impl Config {
         if let Ok(s) = serde_json::to_string_pretty(self) {
             let _ = std::fs::write(dir.join("config.json"), s);
         }
-    }
-    pub fn count_in(&self) -> u32 {
-        self.count_in_bars.unwrap_or(2)
     }
 }
