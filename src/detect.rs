@@ -23,6 +23,11 @@ pub struct DetectParams {
     pub dynamic_range_db: f64,
 }
 
+/// An attack must rise this far (dB) above the median envelope of the 40..5 ms before it.
+/// Rejects re-triggers on ringing open strings (on real takes these cluster below ~8 dB,
+/// real attacks above ~15 dB).
+pub const MIN_CONTRAST_DB: f64 = 12.0;
+
 pub fn detect(x: &[f32], p: &DetectParams) -> Vec<Onset> {
     let sr = p.sample_rate;
     if x.len() < (0.05 * sr) as usize {
@@ -40,17 +45,26 @@ pub fn detect(x: &[f32], p: &DetectParams) -> Vec<Onset> {
     let peaks = find_peaks(&flux, 6.0, distance, 4.0);
     let max_loud = loud.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let w30 = (0.03 * sr) as usize;
+    let (pre_a, pre_b) = ((0.040 * sr) as usize, lag);
     peaks
         .into_iter()
         .filter(|&pk| loud[pk] > max_loud - p.dynamic_range_db)
-        .map(|pk| {
+        .filter_map(|pk| {
             let end = (pk + w30).min(env.len());
             let top = env[pk..end].iter().copied().fold(0.0, f64::max);
             let from = pk.saturating_sub(lag);
             let start = from + env[from..end].iter().position(|&e| e > 0.3 * top).unwrap_or(0);
+            // Contrast against what was ringing just before.
+            let (a, b) = (start.saturating_sub(pre_a), start.saturating_sub(pre_b));
+            if b > a {
+                let pre = crate::dsp::median(&env[a..b]).unwrap_or(0.0);
+                if 20.0 * (top / (pre + 1e-12)).log10() < MIN_CONTRAST_DB {
+                    return None;
+                }
+            }
             let aend = (start + w30).min(x.len());
             let peak = x[start..aend].iter().fold(0.0f32, |m, v| m.max(v.abs()));
-            Onset { time: start as f64 / sr, level_db: 20.0 * (f64::from(peak) + 1e-9).log10() }
+            Some(Onset { time: start as f64 / sr, level_db: 20.0 * (f64::from(peak) + 1e-9).log10() })
         })
         .collect()
 }
@@ -114,5 +128,40 @@ pub mod tests {
         for (o, (t, _)) in on.iter().zip(&truth) {
             assert!((o.time - t).abs() < 0.0015, "onset {} vs {}", o.time, t);
         }
+    }
+
+    /// Ringing open strings: slowly decaying, beating high partials between attacks must
+    /// not re-trigger the detector.
+    #[test]
+    fn ringing_strings_do_not_retrigger() {
+        let sr = 48000.0;
+        let beat = 0.75;
+        let hits: Vec<f64> = (0..12).map(|i| 0.5 + i as f64 * beat).collect();
+        let n = ((0.5 + 12.0 * beat + 1.0) * sr) as usize;
+        let mut rng = Rng::new(9);
+        let mut x = vec![0.0f64; n];
+        for v in x.iter_mut() {
+            *v = 3e-4 * rng.gauss();
+        }
+        for &t in &hits {
+            let s = (t * sr) as usize;
+            for i in 0..(beat * sr) as usize {
+                if s + i >= n {
+                    break;
+                }
+                let tt = i as f64 / sr;
+                let pick = (rng.next_f64() * 2.0 - 1.0) * (-tt / 0.003).exp() * 0.3;
+                // Several high partials with close frequencies -> 6..14 Hz beating, slow decay.
+                let ring: f64 = [(2010.0, 2016.0), (2730.0, 2741.0), (3420.0, 3434.0)]
+                    .iter()
+                    .map(|(a, b)| ((std::f64::consts::TAU * a * tt).sin() + (std::f64::consts::TAU * b * tt).sin()) * 0.03)
+                    .sum::<f64>()
+                    * (-tt / 0.6).exp();
+                x[s + i] += pick + ring;
+            }
+        }
+        let x: Vec<f32> = x.into_iter().map(|v| v as f32).collect();
+        let on = detect(&x, &DetectParams { sample_rate: sr, sixteenth: beat / 4.0, dynamic_range_db: 45.0 });
+        assert_eq!(on.len(), hits.len(), "{:?}", on.iter().map(|o| o.time).collect::<Vec<_>>());
     }
 }

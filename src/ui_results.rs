@@ -346,7 +346,7 @@ fn timing_panel(p: &mut Paint, r: &ResultsState, x: f32, y: f32, w: f32, h: f32)
     p.text(
         sx,
         sy + 70.0,
-        format!("slot pattern {:.1}  drift {:.1}  jitter {:.1} ms", rep.slot_pattern_std_ms, rep.drift_std_ms, rep.jitter_std_ms),
+        format!("slot {:.1}  jitter {:.1}  wander {:.0} ms (not scored)", rep.slot_pattern_std_ms, rep.jitter_std_ms, rep.wander_ms),
         13.0,
         col::DIM,
         Align::Left,
@@ -410,14 +410,16 @@ fn timing_panel(p: &mut Paint, r: &ResultsState, x: f32, y: f32, w: f32, h: f32)
 
     // drift line with jitter band and pins at weak sections
     let (dx, dy, dw, dh) = (x + 16.0, y + 190.0, w - 32.0, 130.0);
-    p.label(dx, dy - 16.0, "drift (11-note moving average) and jitter band");
+    p.label(dx, dy - 16.0, "timing over the take: wander (11-note average) and jitter band");
     p.rect(dx, dy, dw, dh, col::BG);
-    let pts: Vec<(f64, f64)> = rep.notes.iter().filter_map(|n| n.dev_ms.map(|d| (n.grid_time, d))).collect();
+    // Total deviation from the constant latency: the slow part is the tracked wander.
+    let pts: Vec<(f64, f64)> =
+        rep.notes.iter().filter_map(|n| n.dev_ms.map(|d| (n.grid_time, d + n.offset_ms - rep.latency_ms))).collect();
     if pts.len() > 2 {
         let t0 = rep.notes.first().map_or(0.0, |n| n.grid_time);
         let t1 = rep.notes.last().map_or(1.0, |n| n.grid_time).max(t0 + 1e-3);
         let xs = |t: f64| dx + dw * ((t - t0) / (t1 - t0)) as f32;
-        let ys = |ms: f64| dy + dh / 2.0 - (ms.clamp(-40.0, 40.0) / 40.0) as f32 * dh / 2.0;
+        let ys = |ms: f64| dy + dh / 2.0 - (ms.clamp(-150.0, 150.0) / 150.0) as f32 * dh / 2.0;
         p.rect(dx, ys(0.0), dw, 1.0, col::LINE);
         let half = 5;
         let ma: Vec<f64> = (0..pts.len())
@@ -439,8 +441,8 @@ fn timing_panel(p: &mut Paint, r: &ResultsState, x: f32, y: f32, w: f32, h: f32)
                 p.text(px + 4.0, dy + 10.0, format!("#{}", k + 1), 11.0, col::MISS, Align::Left);
             }
         }
-        p.text(dx + 4.0, ys(40.0) + 8.0, "+40 late", 10.0, col::FAINT, Align::Left);
-        p.text(dx + 4.0, ys(-40.0) - 8.0, "-40 early", 10.0, col::FAINT, Align::Left);
+        p.text(dx + 4.0, ys(150.0) + 8.0, "+150 ms late", 10.0, col::FAINT, Align::Left);
+        p.text(dx + 4.0, ys(-150.0) - 8.0, "-150 ms early", 10.0, col::FAINT, Align::Left);
     }
 }
 

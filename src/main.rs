@@ -21,6 +21,11 @@ use bevy::prelude::*;
 use bevy::window::WindowResolution;
 
 fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("--rescore") {
+        session::rescore_cli(&args[1..]);
+        return;
+    }
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {

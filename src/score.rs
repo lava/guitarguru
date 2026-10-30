@@ -2,7 +2,10 @@
 //!
 //! Formulas (all percentages clamped to 0..100):
 //! - spread score  = (35 ms - std) / 30 ms                       (5 ms -> 100 %, 35 ms -> 0 %)
-//! - hit factor    = max(0, matched - 0.5 * extra) / grid notes
+//! - hit factor    = max(0, matched - min(0.5 * extra, grid / 4)) / grid notes
+//! Deviations are measured against a local offset track (sliding median over +/-4 s), so
+//! slow wander of output latency or tempo is reported separately (`wander_ms`) and the
+//! spread is note-to-note timing.
 //! - timing %      = spread score * hit factor
 //! - level score   = (4 dB - level std) / 3 dB                   (1 dB -> 100 %, 4 dB -> 0 %)
 //!   (level std after removing each slot's mean level, so intentional accents don't count)
@@ -35,6 +38,9 @@ pub struct NoteResult {
     /// The note is marked palm-muted.
     #[serde(default)]
     pub pm: bool,
+    /// Local offset (latency + slow wander) the note was matched against, ms.
+    #[serde(default)]
+    pub offset_ms: f64,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -64,7 +70,14 @@ pub struct ScoreReport {
     pub calibrated: bool,
     /// Rushing (<0) / dragging (>0) relative to the calibrated latency, if any.
     pub mean_offset_ms: Option<f64>,
+    /// Timing spread around the local offset track (what the score uses), ms.
     pub spread_ms: f64,
+    /// Spread around one constant offset (includes slow wander), ms.
+    #[serde(default)]
+    pub spread_total_ms: f64,
+    /// Spread of the local offset track itself: slow wander of latency/tempo, ms.
+    #[serde(default)]
+    pub wander_ms: f64,
     pub slot_pattern_std_ms: f64,
     pub drift_std_ms: f64,
     pub jitter_std_ms: f64,
@@ -131,11 +144,35 @@ fn nearest(onsets: &[Onset], t: f64) -> Option<usize> {
     best
 }
 
-/// Globally match grid notes to onsets: closest pairs first, each onset used once.
-fn match_notes(grid: &[GridIn], onsets: &[Onset], offset: f64, window: f64) -> Vec<Option<usize>> {
+/// Half-width (seconds) of the sliding window for the local offset track.
+pub const TRACK_HALF_S: f64 = 4.0;
+
+/// Sliding median of `devs` (per grid note, None = no estimate) over grid notes within
+/// +/-TRACK_HALF_S; falls back to `fallback` where a window has no estimates.
+fn local_track(grid: &[GridIn], devs: &[Option<f64>], fallback: f64) -> Vec<f64> {
+    let mut lo = 0;
+    let mut hi = 0;
+    (0..grid.len())
+        .map(|i| {
+            let t = grid[i].time;
+            while grid[lo].time < t - TRACK_HALF_S {
+                lo += 1;
+            }
+            while hi < grid.len() && grid[hi].time <= t + TRACK_HALF_S {
+                hi += 1;
+            }
+            let v: Vec<f64> = devs[lo..hi].iter().flatten().copied().collect();
+            if v.len() >= 3 { median(&v).unwrap_or(fallback) } else { fallback }
+        })
+        .collect()
+}
+
+/// Globally match grid notes to onsets: closest pairs first, each onset used once. Each
+/// grid note is looked for around its own expected offset.
+fn match_notes(grid: &[GridIn], onsets: &[Onset], offsets: &[f64], window: f64) -> Vec<Option<usize>> {
     let mut pairs = Vec::new();
     for (gi, g) in grid.iter().enumerate() {
-        let t = g.time + offset;
+        let t = g.time + offsets[gi];
         let lo = onsets.partition_point(|o| o.time < t - window);
         for (oi, o) in onsets.iter().enumerate().skip(lo) {
             if o.time > t + window {
@@ -170,26 +207,40 @@ pub fn score(inp: &ScoreInput) -> ScoreReport {
         .filter_map(|g| nearest(onsets, g.time).map(|j| onsets[j].time - g.time))
         .filter(|d| d.abs() < 0.5 * inp.min_ioi)
         .collect();
-    let mut offset = median(&coarse).unwrap_or(0.0);
-    let mut matched = match_notes(grid, onsets, offset, window);
+    let offset0 = median(&coarse).unwrap_or(0.0);
+    // Local offset track: the heard click and the player's sense of it can wander slowly
+    // (output latency changes, tempo drift). Estimate it with a sliding median of
+    // unambiguous nearest-onset deviations, then match around it and refine twice.
+    let near: Vec<Option<f64>> = grid
+        .iter()
+        .map(|g| nearest(onsets, g.time + offset0).map(|j| onsets[j].time - g.time).filter(|d| (d - offset0).abs() < 0.45 * inp.min_ioi))
+        .collect();
+    let mut track = local_track(grid, &near, offset0);
+    let mut matched = match_notes(grid, onsets, &track, window);
     for _ in 0..2 {
-        let d: Vec<f64> =
-            grid.iter().zip(&matched).filter_map(|(g, m)| m.map(|j| onsets[j].time - g.time)).collect();
-        offset = median(&d).unwrap_or(offset);
-        matched = match_notes(grid, onsets, offset, window);
+        let d: Vec<Option<f64>> = grid.iter().zip(&matched).map(|(g, m)| m.map(|j| onsets[j].time - g.time)).collect();
+        track = local_track(grid, &d, offset0);
+        matched = match_notes(grid, onsets, &track, window);
     }
+    let all: Vec<f64> = grid.iter().zip(&matched).filter_map(|(g, m)| m.map(|j| onsets[j].time - g.time)).collect();
+    let offset = median(&all).unwrap_or(offset0);
 
     let mut rep = ScoreReport { n_grid: grid.len(), calibrated: inp.calibrated, latency_ms: offset * 1e3, ..Default::default() };
     let mut devs = Vec::new();
+    let mut total_devs = Vec::new();
+    let mut track_ms = Vec::new();
     let mut raw_devs = Vec::new();
     let mut levels = Vec::new();
     let mut slots_of = Vec::new();
-    for (g, m) in grid.iter().zip(&matched) {
+    for ((g, m), tr) in grid.iter().zip(&matched).zip(&track) {
         let (onset_time, dev_ms, level_db) = match m {
             Some(j) => {
                 let o = onsets[*j];
-                let d = (o.time - g.time - offset) * 1e3;
+                // Scored deviation: relative to the local offset track (slow wander removed).
+                let d = (o.time - g.time - tr) * 1e3;
                 devs.push(d);
+                total_devs.push((o.time - g.time - offset) * 1e3);
+                track_ms.push((tr - offset) * 1e3);
                 raw_devs.push((o.time - g.time) * 1e3);
                 levels.push(o.level_db);
                 slots_of.push(g.slot);
@@ -197,7 +248,7 @@ pub fn score(inp: &ScoreInput) -> ScoreReport {
             }
             None => (None, None, None),
         };
-        rep.notes.push(NoteResult { grid_time: g.time, slot: g.slot, onset_time, dev_ms, level_db, pm: g.pm });
+        rep.notes.push(NoteResult { grid_time: g.time, slot: g.slot, onset_time, dev_ms, level_db, pm: g.pm, offset_ms: tr * 1e3 });
     }
     rep.n_matched = devs.len();
     rep.n_missed = grid.len() - devs.len();
@@ -209,7 +260,7 @@ pub fn score(inp: &ScoreInput) -> ScoreReport {
         used[*j] = true;
     }
     if let (Some(first), Some(last)) = (grid.first(), grid.last()) {
-        let (lo, hi) = (first.time + offset - window, last.time + offset + window);
+        let (lo, hi) = (first.time + track[0] - window, last.time + track[track.len() - 1] + window);
         for (o, u) in onsets.iter().zip(&used) {
             if !u && o.time >= lo && o.time <= hi {
                 if o.level_db >= rep.level_median_db - EXTRA_LEVEL_MARGIN_DB && !levels.is_empty() {
@@ -222,6 +273,8 @@ pub fn score(inp: &ScoreInput) -> ScoreReport {
     }
 
     rep.spread_ms = std(&devs);
+    rep.spread_total_ms = std(&total_devs);
+    rep.wander_ms = std(&track_ms);
     rep.mean_offset_ms = inp.calibrated.then(|| mean(&raw_devs));
 
     // Decomposition: per-slot pattern, slow drift, note-to-note jitter.
@@ -313,7 +366,10 @@ pub fn score(inp: &ScoreInput) -> ScoreReport {
     };
 
     let enough = devs.len() >= 4;
-    rep.hit_factor = if grid.is_empty() { 0.0 } else { (devs.len() as f64 - 0.5 * rep.n_extra as f64).max(0.0) / grid.len() as f64 };
+    // Extra notes cost half a miss each, but at most a quarter of the grid in total, so a
+    // detector problem can't zero the score on its own.
+    let extra_pen = (0.5 * rep.n_extra as f64).min(grid.len() as f64 / 4.0);
+    rep.hit_factor = if grid.is_empty() { 0.0 } else { (devs.len() as f64 - extra_pen).max(0.0) / grid.len() as f64 };
     rep.spread_pct = if enough { pct((35.0 - rep.spread_ms) / 30.0) } else { 0.0 };
     rep.timing_pct = rep.spread_pct * rep.hit_factor;
     rep.level_pct = if enough { pct((4.0 - rep.level_std_detrended_db) / 3.0) } else { 0.0 };

@@ -204,6 +204,7 @@ impl Game {
         // Placeholder plan: the real count-in length is set when the count-in gate opens.
         let plan = SessionPlan::new(&level, 1, seconds);
         engine.start_recording();
+        engine.start_clock_log();
         let sr = f64::from(SAMPLE_RATE);
         let start = engine.shared.out_frames.load(Ordering::Relaxed) + (0.4 * sr) as u64;
         let (in_f, ts) = engine.out_to_in_frame(start);
@@ -316,6 +317,14 @@ impl Game {
         let Some(engine) = &self.engine else { return };
         engine.set_click(None);
         let (rec_start, samples) = engine.stop_recording();
+        let (in_stamps, out_stamps) = engine.take_clock_log(25);
+        let clock = crate::session::ClockLog {
+            in_stamps,
+            out_stamps,
+            input_drops: engine.shared.xruns.load(Ordering::Relaxed),
+            recorded_s: samples.len() as f64 / f64::from(SAMPLE_RATE),
+            session_s: play.plan.total_seconds(),
+        };
         let base = self.base_offset(&play, rec_start);
         let calib = if play.calibration { None } else { self.cfg.latency_ms };
         let run = RunData {
@@ -328,6 +337,7 @@ impl Game {
             timestamps_used: play.timestamps_used,
             stream_latency_ms: play.delta_frames / f64::from(SAMPLE_RATE) * 1e3,
             countin_latency_ms: play.countin_seed_ms,
+            clock,
         };
         let (rep, onsets) = run.analyse();
         let worst = run.worst_windows(&rep, &onsets, 3);
@@ -387,7 +397,7 @@ impl Game {
         let (Some(engine), Some(r)) = (&self.engine, &mut self.results) else { return };
         let Some(w) = r.worst.get(i) else { return };
         let gain = 10f32.powf(self.cfg.audio.click_volume_db / 20.0);
-        let audio = r.run.render_listen(w, &self.cfg.tone, gain, r.rep.latency_ms);
+        let audio = r.run.render_listen(w, &self.cfg.tone, gain);
         engine.play(audio);
         r.listening = Some(i);
     }

@@ -306,6 +306,22 @@ pub struct Shared {
     pub dsp_load: AtomicF32,
     pub playback: Mutex<Option<Playback>>,
     pub xruns: AtomicU32,
+    /// Per-callback (frame, timestamp ns) logs during a session, for diagnosing clocks.
+    pub log_on: AtomicBool,
+    pub in_log: Mutex<Vec<(u64, u128)>>,
+    pub out_log: Mutex<Vec<(u64, u128)>>,
+}
+
+const LOG_CAP: usize = 250_000;
+
+fn log_stamp(on: &AtomicBool, log: &Mutex<Vec<(u64, u128)>>, frame: u64, ns: u128) {
+    if on.load(Ordering::Relaxed)
+        && ns != 0
+        && let Ok(mut l) = log.try_lock()
+        && l.len() < l.capacity()
+    {
+        l.push((frame, ns));
+    }
 }
 
 #[derive(Default)]
@@ -472,6 +488,23 @@ impl AudioEngine {
         r.samples.clear();
         r.samples.reserve(SAMPLE_RATE as usize * 180);
         r.active = true;
+    }
+
+    /// Start logging stream timestamps (pre-allocated, so the callbacks never allocate).
+    pub fn start_clock_log(&self) {
+        for l in [&self.shared.in_log, &self.shared.out_log] {
+            let mut v = l.lock().unwrap();
+            v.clear();
+            v.reserve(LOG_CAP);
+        }
+        self.shared.log_on.store(true, Ordering::Relaxed);
+    }
+
+    /// Stop logging; returns (input log, output log) decimated to every `step`-th entry.
+    pub fn take_clock_log(&self, step: usize) -> (Vec<(u64, u128)>, Vec<(u64, u128)>) {
+        self.shared.log_on.store(false, Ordering::Relaxed);
+        let take = |l: &Mutex<Vec<(u64, u128)>>| std::mem::take(&mut *l.lock().unwrap()).into_iter().step_by(step.max(1)).collect();
+        (take(&self.shared.in_log), take(&self.shared.out_log))
     }
 
     pub fn stop_recording(&self) -> (u64, Vec<f32>) {
@@ -667,6 +700,7 @@ impl InState {
         {
             *r = Some(StampRef { frame: self.frame, nanos: stamp });
         }
+        log_stamp(&sh.log_on, &sh.in_log, self.frame, stamp);
         let x = &mut self.scratch[..n];
         let peak = x.iter().fold(0.0f32, |m, v| m.max(v.abs()));
         sh.in_peak.fetch_max(peak);
@@ -879,6 +913,7 @@ impl OutState {
         {
             *r = Some(StampRef { frame: self.frame, nanos: stamp });
         }
+        log_stamp(&sh.log_on, &sh.out_log, self.frame, stamp);
         let x = &mut self.scratch[..n];
         // Monitor: keep the ring short (bounded latency), fill gaps with silence.
         let avail = self.mon.slots();

@@ -534,10 +534,14 @@ pub struct SessionPlan {
 
 impl SessionPlan {
     pub fn new(level: &Level, count_in_bars: u32, scored_seconds: f64) -> Self {
-        let bpm = level.bpm;
+        let scored_bars = ((scored_seconds / bar_seconds(level.bpm)).round() as u32).max(1);
+        Self::from_bars(level.bpm, count_in_bars, level.bar_patterns(scored_bars), level.pm_on())
+    }
+
+    /// A plan from an explicit pattern per scored bar (e.g. reloaded from a saved run).
+    pub fn from_bars(bpm: u32, count_in_bars: u32, bar_patterns: Vec<usize>, pm_on: bool) -> Self {
         let bar_s = bar_seconds(bpm);
-        let scored_bars = ((scored_seconds / bar_s).round() as u32).max(1);
-        let bar_patterns = level.bar_patterns(scored_bars);
+        let scored_bars = bar_patterns.len() as u32;
         let s16 = sixteenth_seconds(bpm);
         let mut notes = Vec::new();
         for b in 0..scored_bars {
@@ -546,7 +550,7 @@ impl SessionPlan {
             let fr = PATTERNS[pi].frettings();
             for (slot, n) in PATTERNS[pi].hits().iter().enumerate() {
                 let fretting = fr.get(slot).copied().unwrap_or(Fretting::OPEN_E);
-                let pm = n.pm && level.pm_on();
+                let pm = n.pm && pm_on;
                 notes.push(GridNote { time: bar_start + n.pos * s16, bar: b, pattern: pi, slot, pm, fretting, midi: fretting.midi() });
             }
         }
