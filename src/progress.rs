@@ -36,7 +36,14 @@ pub struct Progress {
     /// How many ingredients (in `INGREDIENTS` order) are unlocked.
     #[serde(default)]
     pub ingredients: usize,
+    /// Pattern ids of the last few runs per run key (newest last), so the next run of the
+    /// same combination can pass over them.
+    #[serde(default)]
+    pub recent_patterns: BTreeMap<String, Vec<Vec<String>>>,
 }
+
+/// Runs per combination whose patterns the next run avoids.
+pub const RECENT_RUNS: usize = 3;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct HistoryEntry {
@@ -50,6 +57,10 @@ pub struct HistoryEntry {
     pub mean_offset_ms: Option<f64>,
     pub misses: usize,
     pub seconds: f64,
+    /// Mean pattern difficulty over the run's bars (see `generator::difficulty`); None in
+    /// entries from before generated runs.
+    #[serde(default)]
+    pub difficulty: Option<f64>,
 }
 
 impl Progress {
@@ -58,6 +69,17 @@ impl Progress {
     }
     pub fn best_entry(&self, key: &str) -> Option<&HistoryEntry> {
         self.history_for(key).into_iter().max_by(|a, b| a.combined.total_cmp(&b.combined))
+    }
+    /// Pattern ids played in the last `RECENT_RUNS` runs of this key.
+    pub fn recent_patterns(&self, key: &str) -> std::collections::HashSet<String> {
+        self.recent_patterns.get(key).into_iter().flatten().flatten().cloned().collect()
+    }
+    /// Remember the patterns of a finished run (keeps the last `RECENT_RUNS` per key).
+    pub fn remember_patterns(&mut self, key: &str, ids: Vec<String>) {
+        let runs = self.recent_patterns.entry(key.to_string()).or_default();
+        runs.push(ids);
+        let extra = runs.len().saturating_sub(RECENT_RUNS);
+        runs.drain(..extra);
     }
 }
 
@@ -284,6 +306,22 @@ mod tests {
         let p2 = Progress { ingredients: 1, best: p.best.clone(), ..Default::default() };
         assert!(!p2.is_unlocked(&Level::run(S16, 100)));
         assert!(p2.is_unlocked(&Level::run(PM, 100)));
+    }
+
+    #[test]
+    fn remembers_recent_patterns() {
+        let mut p = Progress::fresh();
+        for i in 0..5 {
+            p.remember_patterns("mix:pm@100", vec![format!("p{i}"), "quarters".into()]);
+        }
+        let r = p.recent_patterns("mix:pm@100");
+        assert_eq!(p.recent_patterns["mix:pm@100"].len(), RECENT_RUNS);
+        assert!(r.contains("p4") && r.contains("p2") && !r.contains("p1"));
+        assert!(p.recent_patterns("mix:pm@120").is_empty());
+        let back: Progress = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(back.recent_patterns("mix:pm@100"), r);
+        let old: Progress = serde_json::from_str(r#"{"best":{},"history":[{"key":"mix:basic@80","date":"","combined":1.0,"timing":0.0,"tone":0.0,"spread_ms":0.0,"level_std_db":0.0,"mean_offset_ms":null,"misses":0,"seconds":1.0}]}"#).unwrap();
+        assert_eq!(old.history[0].difficulty, None);
     }
 
     #[test]

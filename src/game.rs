@@ -215,7 +215,9 @@ impl Game {
         };
         let seconds = if calibration { 8.0 * crate::patterns::bar_seconds(bpm) } else { SCORED_SECONDS };
         // Placeholder plan: the real count-in length is set when the count-in gate opens.
-        let seq = level.sequence(crate::patterns::scored_bars(bpm, seconds));
+        // A fresh draw every time, passing over the patterns of the last runs of this level.
+        let avoid = self.progress.recent_patterns(&level.key());
+        let seq = level.sequence(crate::patterns::scored_bars(bpm, seconds), crate::generator::random_seed(), &avoid);
         let plan = SessionPlan::from_sequence(bpm, 1, seq, level.pm_on());
         engine.start_recording();
         engine.start_clock_log();
@@ -370,6 +372,7 @@ impl Game {
         }
         let key = run.level.key();
         let prev_best = self.progress.best_entry(&key).cloned();
+        let difficulty = run.avg_difficulty();
         let mut newly = Vec::new();
         if play.calibration {
             if rep.n_matched >= 6 {
@@ -379,7 +382,7 @@ impl Game {
         } else {
             newly = self.progress.record(&run.level, rep.combined_pct);
             self.progress.history.push(HistoryEntry {
-                key,
+                key: key.clone(),
                 date: chrono::Local::now().format("%Y-%m-%d %H:%M").to_string(),
                 combined: rep.combined_pct,
                 timing: rep.timing_pct,
@@ -389,7 +392,11 @@ impl Game {
                 mean_offset_ms: rep.mean_offset_ms,
                 misses: rep.n_missed,
                 seconds: run.plan.total_seconds(),
+                difficulty: Some(difficulty),
             });
+            if run.level.is_run() {
+                self.progress.remember_patterns(&key, run.plan.patterns.iter().map(|p| p.id.to_string()).collect());
+            }
             self.progress.save();
         }
         self.results = Some(ResultsState {

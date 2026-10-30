@@ -7,7 +7,8 @@ use serde::Serialize;
 
 use crate::audio::{ClickPlan, render_click};
 use crate::detect::{DetectParams, Onset, detect};
-use crate::patterns::{BEATS_PER_BAR, GridNote, Level, PATTERNS, Sequence, SessionPlan, bar_seconds, beat_seconds, sixteenth_seconds};
+use crate::generator::difficulty;
+use crate::patterns::{BEATS_PER_BAR, GridNote, Level, PATTERNS, Pattern, Sequence, SessionPlan, bar_seconds, beat_seconds, sixteenth_seconds};
 use crate::progress::data_dir;
 use crate::score::{GridIn, ScoreInput, ScoreReport, score};
 
@@ -65,6 +66,13 @@ impl RunData {
         let onsets = detect(&self.samples, &self.detect_params());
         let rep = self.score_onsets(&onsets);
         (rep, onsets)
+    }
+
+    /// Mean difficulty of the run's bars (see `generator::difficulty`).
+    pub fn avg_difficulty(&self) -> f64 {
+        let bars = &self.plan.bar_patterns;
+        let d: Vec<f64> = self.plan.patterns.iter().map(|p| difficulty(p, self.plan.bpm, self.level.pm_on())).collect();
+        if bars.is_empty() { 0.0 } else { bars.iter().map(|&b| d[b]).sum::<f64>() / bars.len() as f64 }
     }
 
     /// Patterns used in this run, in order of first appearance.
@@ -227,8 +235,12 @@ impl RunData {
     }
 
     pub fn save(&self, rep: &ScoreReport, onsets: &[Onset], worst: &[Window]) -> Result<PathBuf, String> {
-        let dir = data_dir().join("runs");
-        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        self.save_in(&data_dir().join("runs"), rep, onsets, worst)
+    }
+
+    /// Save the take (`<stamp>_<level>.wav` + `.json`) into `dir`; returns the WAV path.
+    pub fn save_in(&self, dir: &std::path::Path, rep: &ScoreReport, onsets: &[Onset], worst: &[Window]) -> Result<PathBuf, String> {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
         let base = dir.join(format!("{stamp}_{}", self.level.key().replace('@', "_")));
         let wav = base.with_extension("wav");
@@ -238,11 +250,12 @@ impl RunData {
             w.write_sample(*s).map_err(|e| e.to_string())?;
         }
         w.finalize().map_err(|e| e.to_string())?;
+        /// The full definition, so generated patterns can be rebuilt (format 3).
         #[derive(Serialize)]
         struct PatternInfo<'a> {
-            id: &'a str,
-            name: &'a str,
-            notation: &'a str,
+            #[serde(flatten)]
+            pattern: &'a Pattern,
+            difficulty: f64,
         }
         #[derive(Serialize)]
         struct SlotInfo<'a> {
@@ -252,8 +265,15 @@ impl RunData {
         }
         #[derive(Serialize)]
         struct Out<'a> {
+            /// 3: `patterns` hold full definitions and `seed` the run's draw. Earlier files
+            /// have no format (2: `patterns`/`bar_patterns` ids of built-in patterns, 1: one
+            /// `pattern` id).
+            format: u32,
             level: String,
             level_name: String,
+            seed: Option<u64>,
+            /// Mean pattern difficulty over the scored bars.
+            avg_difficulty: f64,
             /// Patterns used, and the pattern id of every scored bar.
             patterns: Vec<PatternInfo<'a>>,
             bar_patterns: Vec<&'a str>,
@@ -276,12 +296,15 @@ impl RunData {
         }
         let pats = &self.plan.patterns;
         let out = Out {
+            format: 3,
             level: self.level.key(),
             level_name: self.level.name(),
+            seed: self.plan.seed,
+            avg_difficulty: self.avg_difficulty(),
             patterns: self
                 .patterns_used()
                 .into_iter()
-                .map(|p| PatternInfo { id: &pats[p].id, name: &pats[p].name, notation: &pats[p].notation })
+                .map(|p| PatternInfo { pattern: &pats[p], difficulty: difficulty(&pats[p], self.plan.bpm, self.level.pm_on()) })
                 .collect(),
             bar_patterns: self.plan.bar_patterns.iter().map(|&p| &*pats[p].id).collect(),
             slots: self
@@ -310,29 +333,60 @@ impl RunData {
     }
 }
 
+/// The patterns of a saved run. Format 3 stores full definitions (generated patterns
+/// included) and the seed; older files name built-in patterns by id, per bar
+/// (`bar_patterns`) or once for the whole take (`pattern`).
+pub fn saved_sequence(j: &serde_json::Value) -> Result<Sequence, String> {
+    let scored = j.get("scored_bars").and_then(serde_json::Value::as_u64).ok_or("missing scored_bars")? as usize;
+    let format = j.get("format").and_then(serde_json::Value::as_u64).unwrap_or(1);
+    let bar_ids: Vec<String> = match j.get("bar_patterns").and_then(|v| v.as_array()) {
+        Some(a) => a.iter().map(|v| v.as_str().map(str::to_string).ok_or(format!("bad pattern id {v}"))).collect::<Result<_, _>>()?,
+        None => vec![j.get("pattern").and_then(|v| v.as_str()).ok_or("no pattern")?.to_string(); scored],
+    };
+    if format >= 3 {
+        let defs = j.get("patterns").and_then(|v| v.as_array()).ok_or("missing pattern definitions")?;
+        let mut patterns: Vec<Pattern> = Vec::new();
+        for d in defs {
+            let mut p: Pattern = serde_json::from_value(d.clone()).map_err(|e| format!("bad pattern definition: {e}"))?;
+            crate::patterns::parse(&p.notation)?;
+            if let Some(f) = &p.frets {
+                let n = f.split_whitespace().map(crate::patterns::Fretting::parse).collect::<Result<Vec<_>, _>>()?.len();
+                if n != p.hits().len() {
+                    return Err(format!("pattern {}: {n} frettings for {} notes", p.id, p.hits().len()));
+                }
+            }
+            p.in_tracks = true;
+            patterns.push(p);
+        }
+        let bar_patterns = bar_ids
+            .iter()
+            .map(|id| patterns.iter().position(|p| p.id == *id).ok_or(format!("pattern {id} not defined")))
+            .collect::<Result<_, _>>()?;
+        let seed = j.get("seed").and_then(serde_json::Value::as_u64);
+        return Ok(Sequence { patterns, bar_patterns, seed });
+    }
+    let pidx = |id: &str| PATTERNS.iter().position(|p| p.id == id).ok_or(format!("unknown pattern {id}"));
+    let bars: Vec<usize> = bar_ids.iter().map(|id| pidx(id)).collect::<Result<_, _>>()?;
+    Ok(Sequence::from_static(&bars))
+}
+
 /// Load a saved run (JSON + WAV) for offline re-scoring. Understands the JSON of every
-/// earlier version (single `pattern`, tier `level`, and `mix:` levels with `bar_patterns`).
+/// version (see `saved_sequence`; tier `level` keys of format 2 fall back to a basic run).
 pub fn load_run(json_path: &std::path::Path) -> Result<(RunData, serde_json::Value), String> {
     let text = std::fs::read_to_string(json_path).map_err(|e| e.to_string())?;
     let j: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
     let num = |k: &str| j.get(k).and_then(serde_json::Value::as_f64).ok_or(format!("missing {k}"));
     let bpm = num("bpm")? as u32;
     let count_in = num("count_in_bars")? as u32;
-    let scored = num("scored_bars")? as usize;
-    let pidx = |id: &str| PATTERNS.iter().position(|p| p.id == id);
-    let bar_patterns: Vec<usize> = match j.get("bar_patterns").and_then(|v| v.as_array()) {
-        Some(a) => a.iter().map(|v| v.as_str().and_then(pidx).ok_or(format!("unknown pattern {v}"))).collect::<Result<_, _>>()?,
-        None => {
-            let id = j.get("pattern").and_then(|v| v.as_str()).ok_or("no pattern")?;
-            vec![pidx(id).ok_or(format!("unknown pattern {id}"))?; scored]
+    let seq = saved_sequence(&j)?;
+    let level = j.get("level").and_then(|v| v.as_str()).and_then(Level::from_key).unwrap_or_else(|| {
+        let first = &seq.patterns[seq.bar_patterns[0]];
+        match PATTERNS.iter().position(|p| p.id == first.id) {
+            Some(p) if seq.patterns.len() == 1 => Level::drill(p, bpm),
+            _ => Level::run(0, bpm),
         }
-    };
-    let level = j
-        .get("level")
-        .and_then(|v| v.as_str())
-        .and_then(Level::from_key)
-        .unwrap_or_else(|| if bar_patterns.iter().all(|&p| p == bar_patterns[0]) { Level::drill(bar_patterns[0], bpm) } else { Level::run(0, bpm) });
-    let plan = SessionPlan::from_sequence(bpm, count_in, Sequence::from_static(&bar_patterns), level.pm_on());
+    });
+    let plan = SessionPlan::from_sequence(bpm, count_in, seq, level.pm_on());
     // The saved grid is authoritative for timing: check the rebuilt plan agrees.
     if let Some(g) = j.get("grid").and_then(|v| v.as_array()) {
         let times: Vec<f64> = g.iter().filter_map(|n| n.get("time").and_then(serde_json::Value::as_f64)).collect();
@@ -443,6 +497,46 @@ mod tests {
         for w in run.worst_windows(&rep, &onsets, 3) {
             assert!(w.notes.iter().all(|&i| run.plan.notes[i].pattern == w.pattern), "runs: one pattern per window");
         }
+    }
+
+    #[test]
+    fn saved_runs_round_trip_and_old_formats_load() {
+        use crate::patterns::{LH, PM, S16};
+        let level = Level::run(PM | S16 | LH, 120);
+        let plan = SessionPlan::new(&level, 1, 60.0);
+        assert!(plan.patterns.iter().any(|p| p.id.starts_with("g:")), "uses generated patterns");
+        let mut rng = Rng::new(5);
+        let hits: Vec<(f64, f64)> = plan.notes.iter().map(|n| (n.time + 0.2 + 0.01 + 0.004 * rng.gauss(), -18.0)).collect();
+        let samples = synth(48000.0, plan.total_seconds() + 1.5, &hits, 7);
+        let run = RunData { level, plan, sample_rate: 48000, samples, grid_offset_s: 0.2, calibrated: false, timestamps_used: false, stream_latency_ms: 0.0, countin_latency_ms: None, clock: ClockLog::default() };
+        let (rep, onsets) = run.analyse();
+        let dir = std::env::temp_dir().join(format!("guitarguru-test-{}", std::process::id()));
+        let wav = run.save_in(&dir, &rep, &onsets, &[]).unwrap();
+        let loaded = load_run(&wav.with_extension("json"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (back, old) = loaded.unwrap();
+        assert_eq!(back.level, level);
+        assert_eq!(back.plan.sequence(), run.plan.sequence(), "patterns, bars and seed survive");
+        assert_eq!(back.plan.seed, Some(1));
+        assert!((back.avg_difficulty() - run.avg_difficulty()).abs() < 1e-9);
+        let again = back.analyse().0.combined_pct;
+        assert!((again - rep.combined_pct).abs() < 1e-9);
+        assert!((old["combined_pct"].as_f64().unwrap() - again).abs() < 1e-9);
+
+        // Format 2: ids of built-in patterns per bar; format 1: one pattern for the take.
+        let ids = |s: &Sequence| s.bar_patterns.iter().map(|&i| s.patterns[i].id.to_string()).collect::<Vec<_>>();
+        let v2 = serde_json::json!({"scored_bars": 3, "bar_patterns": ["quarters", "gallop", "gallop"],
+            "patterns": [{"id": "quarters", "name": "Quarters", "notation": "8:D-D-D-D-"}]});
+        let s2 = saved_sequence(&v2).unwrap();
+        assert_eq!(ids(&s2), ["quarters", "gallop", "gallop"]);
+        assert_eq!((s2.patterns.len(), s2.seed), (2, None));
+        let s1 = saved_sequence(&serde_json::json!({"scored_bars": 2, "pattern": "eighths"})).unwrap();
+        assert_eq!(ids(&s1), ["eighths", "eighths"]);
+        assert!(saved_sequence(&serde_json::json!({"scored_bars": 1, "pattern": "nope"})).is_err());
+        // Format 3 checks the definitions it rebuilds.
+        let bad = serde_json::json!({"format": 3, "scored_bars": 1, "bar_patterns": ["g:x"],
+            "patterns": [{"id": "g:x", "name": "x", "needs": 4, "notation": "8:D-D-D-D-", "frets": "E0 E3"}]});
+        assert!(saved_sequence(&bad).is_err());
     }
 
     /// Regression check on the real takes in the user's data dir (skipped if absent):

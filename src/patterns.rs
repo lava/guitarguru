@@ -84,6 +84,11 @@ impl Fretting {
         }
         Ok(Self { string, fret, power })
     }
+    /// The notation token (`E0`, `A5p`), inverse of `parse`.
+    pub fn token(&self) -> String {
+        let letter = ['?', 'e', 'B', 'G', 'D', 'A', 'E'][self.string.min(6) as usize];
+        format!("{letter}{}{}", self.fret, if self.power { "p" } else { "" })
+    }
 }
 
 /// Mix-in ingredients, in unlock order. A run is (BPM, set of active ingredients); its
@@ -360,16 +365,6 @@ impl Pattern {
             .collect()
     }
 
-    /// How different this pattern is from plain quarters: strokes added or removed on the
-    /// 16th grid. Orders a track's progression from simple to varied.
-    pub fn distance_from_quarters(&self) -> usize {
-        let on: Vec<i64> = self.hits().iter().map(|n| (n.pos * 3.0).round() as i64).collect();
-        let quarters = [0i64, 12, 24, 36];
-        let added = on.iter().filter(|p| !quarters.contains(p)).count();
-        let removed = quarters.iter().filter(|q| !on.contains(q)).count();
-        added + removed
-    }
-
     /// Fretting of each played note (defaults to the open low E).
     pub fn frettings(&self) -> Vec<Fretting> {
         let n = self.hits().len();
@@ -466,11 +461,12 @@ impl Level {
             LevelKind::Drill(p) => format!("{} drill", PATTERNS[p].name),
         }
     }
-    /// The patterns of a session of `bars` scored bars.
-    pub fn sequence(&self, bars: u32) -> Sequence {
+    /// The patterns of a session of `bars` scored bars. Runs draw a fresh sequence per
+    /// `seed`, passing over the pattern ids in `avoid` (see `generator::run_sequence`);
+    /// drills play their pattern (multi-bar riffs cycle through their bars).
+    pub fn sequence(&self, bars: u32, seed: u64, avoid: &std::collections::HashSet<String>) -> Sequence {
         match self.kind {
             LevelKind::Drill(p) => {
-                // Multi-bar riffs cycle through their bars.
                 let mut order = Vec::with_capacity(bars as usize);
                 let mut cur = p;
                 for _ in 0..bars {
@@ -479,11 +475,7 @@ impl Level {
                 }
                 Sequence::from_static(&order)
             }
-            LevelKind::Run(m) => {
-                let order = run_segments(m, bars.div_ceil(SEGMENT_BARS) as usize, &self.key());
-                let per_bar: Vec<usize> = (0..bars).map(|b| order[(b / SEGMENT_BARS) as usize]).collect();
-                Sequence::from_static(&per_bar)
-            }
+            LevelKind::Run(m) => crate::generator::run_sequence(m, self.bpm, bars, seed, avoid),
         }
     }
 }
@@ -494,6 +486,8 @@ pub struct Sequence {
     pub patterns: Vec<Pattern>,
     /// Index into `patterns` per scored bar.
     pub bar_patterns: Vec<usize>,
+    /// Seed the run's patterns were drawn with (None: fixed, e.g. drills, old saved runs).
+    pub seed: Option<u64>,
 }
 
 impl Sequence {
@@ -509,52 +503,8 @@ impl Sequence {
                 })
             })
             .collect();
-        Self { patterns: used.into_iter().map(|p| PATTERNS[p].clone()).collect(), bar_patterns }
+        Self { patterns: used.into_iter().map(|p| PATTERNS[p].clone()).collect(), bar_patterns, seed: None }
     }
-}
-
-/// Seeded segment order for a run. The first segment is always plain quarters. After that
-/// the pool (basic material plus patterns whose needs are all active) is walked as a ramp:
-/// early segments pick among the patterns closest to quarters (one stroke added or
-/// removed), later ones may use anything; unused patterns are preferred, patterns using
-/// the active ingredients are favoured in the second half, and the same pattern never
-/// plays twice in a row. The seed comes from (BPM, ingredient set), so runs of the same
-/// combination are comparable.
-pub fn run_segments(mask: u8, segments: usize, key: &str) -> Vec<usize> {
-    let quarters = PATTERNS.iter().position(|p| p.id == "quarters").unwrap_or(0);
-    let mut pool: Vec<usize> =
-        (0..PATTERNS.len()).filter(|&i| PATTERNS[i].in_tracks && PATTERNS[i].needs & !mask == 0 && i != quarters).collect();
-    pool.sort_by_key(|&i| (PATTERNS[i].distance_from_quarters(), PATTERNS[i].needs));
-    let mut seed = key.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x100000001b3));
-    let mut rnd = move || {
-        seed ^= seed << 13;
-        seed ^= seed >> 7;
-        seed ^= seed << 17;
-        seed
-    };
-    let mut out = vec![quarters];
-    for k in 1..segments {
-        let frac = k as f64 / (segments.max(2) - 1) as f64;
-        let reach = ((pool.len() as f64 * frac).ceil() as usize).clamp(3.min(pool.len()), pool.len());
-        let mut cands: Vec<usize> = pool[..reach].to_vec();
-        if mask != 0 && k * 2 >= segments {
-            let featured: Vec<usize> = pool.iter().copied().filter(|&i| PATTERNS[i].needs & mask != 0 && !out.contains(&i)).collect();
-            if !featured.is_empty() {
-                cands = featured;
-            }
-        }
-        let unused: Vec<usize> = cands.iter().copied().filter(|i| !out.contains(i)).collect();
-        if !unused.is_empty() {
-            cands = unused;
-        }
-        let last = *out.last().unwrap_or(&quarters);
-        if cands.len() > 1 {
-            cands.retain(|&i| i != last);
-        }
-        let pick = if cands.is_empty() { pool[(rnd() % pool.len() as u64) as usize] } else { cands[(rnd() % cands.len() as u64) as usize] };
-        out.push(pick);
-    }
-    out
 }
 
 /// A grid note to be played.
@@ -584,19 +534,21 @@ pub struct SessionPlan {
     pub patterns: Vec<Pattern>,
     /// Pattern per scored bar (index into `patterns`).
     pub bar_patterns: Vec<usize>,
+    /// Seed of a run's pattern draw.
+    pub seed: Option<u64>,
     pub notes: Vec<GridNote>,
 }
 
 impl SessionPlan {
     #[cfg(test)]
     pub fn new(level: &Level, count_in_bars: u32, scored_seconds: f64) -> Self {
-        let seq = level.sequence(scored_bars(level.bpm, scored_seconds));
+        let seq = level.sequence(scored_bars(level.bpm, scored_seconds), 1, &Default::default());
         Self::from_sequence(level.bpm, count_in_bars, seq, level.pm_on())
     }
 
     /// A plan playing `seq` after `count_in_bars` bars of count-in.
     pub fn from_sequence(bpm: u32, count_in_bars: u32, seq: Sequence, pm_on: bool) -> Self {
-        let Sequence { patterns, bar_patterns } = seq;
+        let Sequence { patterns, bar_patterns, seed } = seq;
         let bar_s = bar_seconds(bpm);
         let scored_bars = bar_patterns.len() as u32;
         let s16 = sixteenth_seconds(bpm);
@@ -611,11 +563,11 @@ impl SessionPlan {
                 notes.push(GridNote { time: bar_start + n.pos * s16, bar: b, pattern: pi, slot, pm, fretting, midi: fretting.midi() });
             }
         }
-        Self { bpm, count_in_bars, scored_bars, patterns, bar_patterns, notes }
+        Self { bpm, count_in_bars, scored_bars, patterns, bar_patterns, seed, notes }
     }
     /// The sequence this plan plays.
     pub fn sequence(&self) -> Sequence {
-        Sequence { patterns: self.patterns.clone(), bar_patterns: self.bar_patterns.clone() }
+        Sequence { patterns: self.patterns.clone(), bar_patterns: self.bar_patterns.clone(), seed: self.seed }
     }
     /// Pattern of scored bar `b` (count-in bars show the first pattern).
     pub fn pattern_at(&self, bar: i64) -> usize {
@@ -671,7 +623,7 @@ mod tests {
             }
         }
         let verse = PATTERNS.iter().position(|p| p.id == "pursuit_verse").unwrap();
-        let seq = Level::drill(verse, 120).sequence(4);
+        let seq = Level::drill(verse, 120).sequence(4, 0, &Default::default());
         assert_eq!(seq.bar_patterns.iter().map(|&i| &*seq.patterns[i].id).collect::<Vec<_>>(), ["pursuit_verse", "pursuit_verse_b", "pursuit_verse", "pursuit_verse_b"]);
         assert_eq!(Fretting::parse("A5p").unwrap().midi(), 50);
         assert_eq!(Fretting::OPEN_E.midi(), 40);
@@ -706,31 +658,22 @@ mod tests {
         }).collect::<String>();
         assert_eq!(ghosts("dotted"), "DudUDudU");
         assert_eq!(ghosts("gallop"), "DuDUDuDUDuDUDuDU");
-        assert_eq!(pattern_by_id("quarters").unwrap().distance_from_quarters(), 0);
-        assert_eq!(pattern_by_id("q_pickup").unwrap().distance_from_quarters(), 1);
-        assert_eq!(pattern_by_id("offbeats").unwrap().distance_from_quarters(), 8);
     }
 
     #[test]
-    fn run_order_is_seeded_and_mixed() {
+    fn runs_are_drawn_per_seed_and_mixed() {
         let idx = |id: &str| PATTERNS.iter().position(|p| p.id == id).unwrap();
-        let a = run_segments(PM | S16, 8, "mix:pm+16@120");
-        assert_eq!(a, run_segments(PM | S16, 8, "mix:pm+16@120"), "same combination, same order");
-        assert_ne!(a, run_segments(PM | S16, 8, "mix:pm+16@140"));
-        assert!(!a.contains(&idx("pursuit")), "drill-only riffs stay out of runs");
-        assert!(a.iter().all(|&p| PATTERNS[p].needs & !(PM | S16) == 0), "only active ingredients");
-        assert_eq!(a[0], idx("quarters"), "runs start with quarters");
-        assert!(PATTERNS[a[1]].distance_from_quarters() <= 2, "{}", PATTERNS[a[1]].id);
-        assert!(a[4..].iter().any(|&p| PATTERNS[p].needs != 0), "ingredients featured later: {a:?}");
+        let none = std::collections::HashSet::new();
+        let l = Level::run(PM | S16, 120);
+        let a = l.sequence(60, 5, &none);
+        assert_eq!(a, l.sequence(60, 5, &none), "same seed, same run");
+        assert_ne!(a, l.sequence(60, 6, &none), "another seed, another run");
+        assert_eq!(a.seed, Some(5));
+        assert!(!a.patterns.iter().any(|p| p.id.starts_with("pursuit")), "drill-only riffs stay out of runs");
+        assert_eq!(a.patterns[a.bar_patterns[0]].id, "quarters", "runs start with quarters");
         for i in INGREDIENTS {
             assert!(PATTERNS.iter().any(|p| p.needs & i.bit != 0 && p.in_tracks), "{} has patterns", i.name);
         }
-        assert!(a.windows(2).all(|w| w[0] != w[1]), "{a:?}");
-        let t1 = run_segments(0, 12, "mix:basic@180");
-        assert_eq!(t1[0], idx("quarters"));
-        assert!(PATTERNS[t1[1]].distance_from_quarters() == 1, "{}", PATTERNS[t1[1]].id);
-        assert!(t1.iter().all(|&p| PATTERNS[p].needs == 0));
-        assert!(t1.iter().collect::<std::collections::HashSet<_>>().len() >= 8, "varied: {t1:?}");
         let l = Level::run(S16, 100);
         let plan = SessionPlan::new(&l, 2, 120.0);
         assert_eq!(plan.bar_patterns.len(), 50);
@@ -741,6 +684,9 @@ mod tests {
         assert_eq!(Level::from_key("mix:basic@80"), Some(Level::run(0, 80)));
         assert_eq!(Level::from_key("gallop@80"), Some(Level::drill(idx("gallop"), 80)));
         assert_eq!(PATTERNS[idx("pursuit")].drill_needs(), S16 | PM);
+        for t in ["E0", "A5p", "D9", "e12"] {
+            assert_eq!(Fretting::parse(t).unwrap().token(), t);
+        }
     }
 
     #[test]

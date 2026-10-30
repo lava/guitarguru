@@ -5,6 +5,7 @@ mod countin;
 mod detect;
 mod dsp;
 mod game;
+mod generator;
 mod mascot;
 mod monitor;
 mod paint;
