@@ -93,11 +93,15 @@ pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
 
         // ---------- current pattern
         p.hline(120.0, 545.0, 1200.0, col::LINE);
-        let rel = t - start;
+        // The session keeps recording a short tail after the last bar (see
+        // `Game::tick_play`); hold the last bar, playhead at its end, until results show.
+        let td = if waiting { t } else { t.min(total) };
+        let rel = td - start;
         let in_count_in = waiting || rel < 0.0;
-        let bar_idx = if in_count_in { 0 } else { (rel / bar_s).floor() as i64 };
+        let last_bar = i64::from(play.plan.scored_bars) - 1;
+        let bar_idx = if in_count_in { 0 } else { ((rel / bar_s).floor() as i64).min(last_bar) };
         let bar_t0 = start + bar_idx as f64 * bar_s;
-        let pos16 = ((t - bar_t0) / s16) as f32;
+        let pos16 = (((td - bar_t0) / s16) as f32).min(16.0);
         let cur = play.plan.pattern_at(bar_idx);
         let (pm_on, tab) = (play.level.pm_on(), play.level.tab());
         p.label_at(120.0, 583.0, &section_letter(&play.plan.bar_patterns, cur), Align::Left, col::DIM);
