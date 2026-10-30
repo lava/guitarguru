@@ -38,9 +38,8 @@ pub mod col {
 pub enum Shape {
     Rect,
     Disc,
-    /// Triangle pointing right.
-    TriRight,
-    TriLeft,
+    /// Triangle pointing right (rotated by `rot`).
+    Tri,
 }
 
 struct ShapeCmd {
@@ -48,6 +47,8 @@ struct ShapeCmd {
     center: Vec2,
     size: Vec2,
     color: Color,
+    /// Rotation in radians, counter-clockwise on screen.
+    rot: f32,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -96,7 +97,7 @@ struct PoolText;
 
 impl Paint {
     pub fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: Color) {
-        self.shapes.push(ShapeCmd { shape: Shape::Rect, center: Vec2::new(x + w / 2.0, y + h / 2.0), size: Vec2::new(w, h), color });
+        self.shapes.push(ShapeCmd { shape: Shape::Rect, center: Vec2::new(x + w / 2.0, y + h / 2.0), size: Vec2::new(w, h), color, rot: 0.0 });
     }
     /// Outline of width `t`.
     pub fn frame(&mut self, x: f32, y: f32, w: f32, h: f32, t: f32, color: Color) {
@@ -123,11 +124,20 @@ impl Paint {
         }
     }
     pub fn disc(&mut self, cx: f32, cy: f32, r: f32, color: Color) {
-        self.shapes.push(ShapeCmd { shape: Shape::Disc, center: Vec2::new(cx, cy), size: Vec2::splat(2.0 * r), color });
+        self.shapes.push(ShapeCmd { shape: Shape::Disc, center: Vec2::new(cx, cy), size: Vec2::splat(2.0 * r), color, rot: 0.0 });
     }
     pub fn tri(&mut self, cx: f32, cy: f32, r: f32, right: bool, color: Color) {
-        let shape = if right { Shape::TriRight } else { Shape::TriLeft };
-        self.shapes.push(ShapeCmd { shape, center: Vec2::new(cx, cy), size: Vec2::splat(2.0 * r), color });
+        let rot = if right { 0.0 } else { std::f32::consts::PI };
+        self.shapes.push(ShapeCmd { shape: Shape::Tri, center: Vec2::new(cx, cy), size: Vec2::splat(2.0 * r), color, rot });
+    }
+    /// Pick-direction arrow: a shaft with a triangular head, pointing down or up.
+    pub fn stroke_arrow(&mut self, cx: f32, cy: f32, len: f32, down: bool, color: Color) {
+        let head = len * 0.42;
+        let shaft = len - head * 0.8;
+        let (sy, hy) = if down { (cy - len / 2.0, cy + len / 2.0 - head / 2.0) } else { (cy + len / 2.0 - shaft, cy - len / 2.0 + head / 2.0) };
+        self.rect(cx - len * 0.06, sy, len * 0.12, shaft, color);
+        let rot = if down { -std::f32::consts::FRAC_PI_2 } else { std::f32::consts::FRAC_PI_2 };
+        self.shapes.push(ShapeCmd { shape: Shape::Tri, center: Vec2::new(cx, hy), size: Vec2::splat(head), color, rot });
     }
     pub fn cross(&mut self, cx: f32, cy: f32, r: f32, color: Color) {
         self.line(cx - r, cy - r, cx + r, cy + r, color);
@@ -279,9 +289,8 @@ fn flush(
         let image = match s.shape {
             Shape::Rect => Handle::default(),
             Shape::Disc => images.disc.clone(),
-            Shape::TriRight | Shape::TriLeft => images.tri.clone(),
+            Shape::Tri => images.tri.clone(),
         };
-        let flip = s.shape == Shape::TriLeft;
         let pos = to_world(s.center).extend(z);
         match it.next() {
             Some((mut sp, mut tf, mut vis)) => {
@@ -290,15 +299,15 @@ fn flush(
                 }
                 sp.color = s.color;
                 sp.custom_size = Some(s.size);
-                sp.flip_x = flip;
                 tf.translation = pos;
+                tf.rotation = Quat::from_rotation_z(s.rot);
                 *vis = Visibility::Visible;
             }
             None => {
                 let mut sp = Sprite::from_color(s.color, s.size);
                 sp.image = image;
-                sp.flip_x = flip;
-                commands.spawn((sp, Transform::from_translation(pos), Visibility::Visible, PoolSprite));
+                let tf = Transform::from_translation(pos).with_rotation(Quat::from_rotation_z(s.rot));
+                commands.spawn((sp, tf, Visibility::Visible, PoolSprite));
             }
         }
     }

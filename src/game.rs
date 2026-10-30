@@ -7,10 +7,10 @@ use bevy::prelude::*;
 
 use crate::audio::{AudioEngine, ClickPlan, DeviceEntry, SAMPLE_RATE};
 use crate::config::Config;
-use crate::detect::{DetectParams, LiveDetector, Onset};
+use crate::detect::Onset;
 use crate::monitor::Chain;
 use crate::paint::Paint;
-use crate::patterns::{BEATS_PER_BAR, PATTERNS, Pattern, SessionPlan, beat_seconds, pattern_by_id, sixteenth_seconds};
+use crate::patterns::{BEATS_PER_BAR, PATTERNS, Pattern, SessionPlan, beat_seconds, pattern_by_id};
 use crate::progress::{HistoryEntry, Progress, level_key};
 use crate::score::ScoreReport;
 use crate::session::{RunData, Window};
@@ -26,16 +26,6 @@ pub enum Screen {
     Results,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct LiveHit {
-    /// Session time of the onset.
-    pub t: f64,
-    pub level_db: f64,
-    /// Nearest grid note and the latency-compensated deviation (ms).
-    pub note: Option<usize>,
-    pub dev_ms: f64,
-}
-
 pub struct PlayState {
     pub pattern: &'static Pattern,
     pub plan: SessionPlan,
@@ -44,11 +34,6 @@ pub struct PlayState {
     /// input frame = output frame + delta
     pub delta_frames: f64,
     pub timestamps_used: bool,
-    pub live: LiveDetector,
-    pub hits: Vec<LiveHit>,
-    /// Per grid note: Some(dev ms) when hit live.
-    pub note_dev: Vec<Option<f64>>,
-    raw_devs: Vec<f64>,
     pub ended_early: Option<f64>,
 }
 
@@ -56,16 +41,6 @@ impl PlayState {
     pub fn now(&self, engine: &AudioEngine) -> f64 {
         let f = engine.shared.out_frames.load(Ordering::Relaxed) as f64;
         (f - self.click_start_frame as f64) / f64::from(SAMPLE_RATE)
-    }
-    pub fn live_latency(&self) -> f64 {
-        let n = self.raw_devs.len();
-        if n < 4 {
-            return 0.0;
-        }
-        crate::dsp::median(&self.raw_devs[n.saturating_sub(24)..]).unwrap_or(0.0)
-    }
-    pub fn window(&self) -> f64 {
-        0.4 * sixteenth_seconds(self.plan.bpm)
     }
 }
 
@@ -203,18 +178,13 @@ impl Game {
             beats: plan.total_beats(),
             beats_per_bar: BEATS_PER_BAR,
         }));
-        let n = plan.notes.len();
         self.play = Some(PlayState {
             pattern,
-            live: LiveDetector::new(DetectParams { sample_rate: sr, sixteenth: sixteenth_seconds(bpm), dynamic_range_db: 45.0 }),
             plan,
             calibration,
             click_start_frame: start,
             delta_frames: delta,
             timestamps_used: ts,
-            hits: Vec::new(),
-            note_dev: vec![None; n],
-            raw_devs: Vec::new(),
             ended_early: None,
         });
         self.results = None;
@@ -235,47 +205,12 @@ impl Game {
         self.screen = Screen::Menu;
     }
 
-    /// Per-frame play logic: live detection and end-of-session handling.
+    /// Per-frame play logic: end the session after the last bar. No live analysis: the
+    /// take is scored afterwards so the global input lag can be estimated over the whole run.
     pub fn tick_play(&mut self) {
-        let (Some(engine), Some(play)) = (&self.engine, &mut self.play) else { return };
-        let now = play.now(engine);
-        let calib_s = if play.calibration { 0.0 } else { self.cfg.latency_ms.unwrap_or(0.0) / 1e3 };
-        // Live onsets
-        let new = {
-            let rec = engine.recording.lock().unwrap();
-            if rec.samples.is_empty() {
-                Vec::new()
-            } else {
-                let off = (play.click_start_frame as f64 + play.delta_frames - rec.start_frame as f64) / f64::from(SAMPLE_RATE);
-                play.live.update(&rec.samples).into_iter().map(|o| (o, off)).collect::<Vec<_>>()
-            }
-        };
-        let win = play.window();
-        for (o, off) in new {
-            let t = o.time - off - calib_s;
-            let notes = &play.plan.notes;
-            let i = notes.partition_point(|n| n.time < t);
-            let cand = [i.wrapping_sub(1), i]
-                .into_iter()
-                .filter(|&j| j < notes.len())
-                .min_by(|&a, &b| (notes[a].time - t).abs().total_cmp(&(notes[b].time - t).abs()));
-            let mut hit = LiveHit { t, level_db: o.level_db, note: None, dev_ms: 0.0 };
-            if let Some(j) = cand {
-                let raw = t - notes[j].time;
-                if raw.abs() < win {
-                    play.raw_devs.push(raw);
-                }
-                let dev = raw - play.live_latency();
-                if dev.abs() <= win && play.note_dev[j].is_none() {
-                    play.note_dev[j] = Some(dev * 1e3);
-                    hit.note = Some(j);
-                    hit.dev_ms = dev * 1e3;
-                }
-            }
-            play.hits.push(hit);
-        }
+        let (Some(engine), Some(play)) = (&self.engine, &self.play) else { return };
         let end = play.ended_early.unwrap_or(play.plan.total_seconds() + 0.3);
-        if now >= end {
+        if play.now(engine) >= end {
             self.finish_play();
         }
     }
@@ -292,7 +227,6 @@ impl Game {
         }
         // Keep only fully played bars.
         play.plan.notes.retain(|n| n.bar < done_bars);
-        play.note_dev.truncate(play.plan.notes.len());
         play.plan.scored_bars = done_bars;
         play.ended_early = Some(now);
         engine.set_click(None);
@@ -425,6 +359,10 @@ pub fn game_system(mut game: ResMut<Game>, mut paint: ResMut<Paint>, time: Res<T
         Screen::Play => {
             if keys.just_pressed(KeyCode::Escape) {
                 g.abort_play();
+                return;
+            }
+            if keys.just_pressed(KeyCode::Enter) {
+                g.end_early();
                 return;
             }
             g.tick_play();

@@ -77,6 +77,18 @@ pub fn parse(notation: &str) -> Result<Vec<BarNote>, String> {
     Ok(out)
 }
 
+impl BarNote {
+    /// Pick direction with strict alternate picking on the 16th grid (down on 1/+, up
+    /// on e/a); 16th triplets alternate within each triplet group, starting down.
+    pub fn downstroke(&self) -> bool {
+        if (self.pos - self.pos.round()).abs() < 1e-6 && (self.len - self.len.round()).abs() < 1e-6 {
+            (self.pos.round() as i64) % 2 == 0
+        } else {
+            ((self.pos * 1.5).round() as i64) % 2 == 0
+        }
+    }
+}
+
 impl Pattern {
     pub fn bar(&self) -> Vec<BarNote> {
         parse(self.notation).expect("built-in pattern must parse")
@@ -157,6 +169,14 @@ mod tests {
         let p = pattern_by_id("pursuit").unwrap();
         let pos: Vec<f64> = p.hits().iter().map(|n| n.pos).collect();
         assert_eq!(pos, vec![0.0, 2.0, 3.0, 4.0, 6.0, 8.0, 9.0, 10.0, 12.0, 13.0, 14.0]);
+    }
+
+    #[test]
+    fn pick_directions() {
+        let dirs = |id: &str| pattern_by_id(id).unwrap().hits().iter().map(|n| if n.downstroke() { 'D' } else { 'U' }).collect::<String>();
+        assert_eq!(dirs("gallop"), "DDUDDUDDUDDU");
+        assert_eq!(dirs("reverse_gallop"), "DUDDUDDUDDUD");
+        assert_eq!(dirs("triplet_gallop"), "DUDDDUDDDUDDDUDD");
     }
 
     #[test]

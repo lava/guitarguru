@@ -55,53 +55,6 @@ pub fn detect(x: &[f32], p: &DetectParams) -> Vec<Onset> {
         .collect()
 }
 
-/// Incremental wrapper for live feedback: re-runs the detector over the tail of the
-/// growing recording and reports onsets once they are old enough to be stable.
-pub struct LiveDetector {
-    params: DetectParams,
-    /// Index into the recording up to which onsets have been reported.
-    reported_until: f64,
-    last_onset: f64,
-}
-
-impl LiveDetector {
-    pub fn new(params: DetectParams) -> Self {
-        Self { params, reported_until: 0.0, last_onset: f64::NEG_INFINITY }
-    }
-
-    /// `rec` is the full recording so far. Returns newly detected onsets (absolute times).
-    pub fn update(&mut self, rec: &[f32]) -> Vec<Onset> {
-        let sr = self.params.sample_rate;
-        let window = (1.5 * sr) as usize;
-        let settle = 0.06; // seconds an onset must be in the past before it's reported
-        let start = rec.len().saturating_sub(window);
-        let t0 = start as f64 / sr;
-        let t_end = rec.len() as f64 / sr - settle;
-        if t_end <= self.reported_until {
-            return Vec::new();
-        }
-        let min_gap = 0.55 * self.params.sixteenth;
-        let mut out = Vec::new();
-        for mut o in detect(&rec[start..], &self.params) {
-            o.time += t0;
-            // Skip the start of the window (filter edge) except at the very beginning.
-            if start > 0 && o.time < t0 + 0.05 {
-                continue;
-            }
-            // Live view only: ignore noise-floor wiggles when nothing is played.
-            if o.level_db < -60.0 {
-                continue;
-            }
-            if o.time > self.reported_until && o.time <= t_end && o.time - self.last_onset >= min_gap {
-                self.last_onset = o.time;
-                out.push(o);
-            }
-        }
-        self.reported_until = t_end;
-        out
-    }
-}
-
 #[cfg(test)]
 pub mod tests {
     use super::*;
@@ -160,25 +113,6 @@ pub mod tests {
         assert_eq!(on.len(), truth.len());
         for (o, (t, _)) in on.iter().zip(&truth) {
             assert!((o.time - t).abs() < 0.0015, "onset {} vs {}", o.time, t);
-        }
-    }
-
-    #[test]
-    fn live_matches_offline() {
-        let sr = 48000.0;
-        let s16 = 60.0 / 100.0 / 4.0;
-        let truth: Vec<(f64, f64)> = (0..30).map(|i| (0.3 + i as f64 * 2.0 * s16, -20.0)).collect();
-        let x = synth(sr, 0.3 + 60.0 * s16 + 0.5, &truth, 5);
-        let p = DetectParams { sample_rate: sr, sixteenth: s16, dynamic_range_db: 45.0 };
-        let mut live = LiveDetector::new(p);
-        let mut got = Vec::new();
-        for end in (0..x.len()).step_by(800) {
-            got.extend(live.update(&x[..end]));
-        }
-        got.extend(live.update(&x));
-        assert_eq!(got.len(), truth.len());
-        for (o, (t, _)) in got.iter().zip(&truth) {
-            assert!((o.time - t).abs() < 0.0015);
         }
     }
 }
