@@ -173,13 +173,14 @@ pub fn draw(g: &mut Game, p: &mut Paint, keys: &ButtonInput<KeyCode>) {
     p.text(292.0, 830.0, info, 17.0, col::TEXT, Align::Left);
     p.text(1408.0, 830.0, "click again or Enter to play", 13.0, col::FAINT, Align::Right);
 
-    if let Some(e) = &g.engine_err {
-        p.text(32.0, 872.0, format!("audio: {e}"), 14.0, col::MISS, Align::Left);
-    } else if let Some(w) = g.engine.as_ref().and_then(|e| e.info.warning.clone()) {
-        p.text(32.0, 872.0, w, 14.0, col::LATE, Align::Left);
+    if let Some((msg, bad)) = g.input_problem() {
+        p.text(32.0, 872.0, truncate(&msg, 120), 14.0, if bad { col::MISS } else { col::LATE }, Align::Left);
+        if p.button(1300.0, 856.0, 108.0, 32.0, "Retry", false) {
+            g.restart_engine();
+        }
     }
     if let Some(m) = &g.message {
-        p.text(1408.0, 872.0, m.clone(), 14.0, col::MISS, Align::Right);
+        p.text(1408.0, 800.0, m.clone(), 14.0, col::MISS, Align::Right);
     }
 }
 

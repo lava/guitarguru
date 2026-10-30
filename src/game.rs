@@ -75,6 +75,7 @@ pub struct SettingsLists {
     pub nams: Vec<String>,
     pub irs: Vec<String>,
     pub input_scroll: usize,
+    pub show_all: bool,
 }
 
 #[derive(Resource)]
@@ -84,6 +85,7 @@ pub struct Game {
     pub progress: Progress,
     pub engine: Option<AudioEngine>,
     pub engine_err: Option<String>,
+    pub engine_started: std::time::Instant,
     pub meter_db: f32,
     pub meter_peak_db: f32,
     pub meter_hold: f32,
@@ -104,6 +106,7 @@ impl Game {
             progress,
             engine: None,
             engine_err: None,
+            engine_started: std::time::Instant::now(),
             meter_db: -90.0,
             meter_peak_db: -90.0,
             meter_hold: 0.0,
@@ -119,6 +122,7 @@ impl Game {
 
     pub fn restart_engine(&mut self) {
         self.engine = None; // release the devices first
+        self.engine_started = std::time::Instant::now();
         match AudioEngine::start(&self.cfg.audio, &self.cfg.tone) {
             Ok(e) => {
                 self.engine_err = None;
@@ -129,6 +133,24 @@ impl Game {
                 self.engine_err = Some(e);
             }
         }
+    }
+
+    /// A status line about the input when something is wrong: open error, adapter missing,
+    /// or an open stream that delivers no data (e.g. held exclusively elsewhere).
+    pub fn input_problem(&self) -> Option<(String, bool)> {
+        if let Some(e) = &self.engine_err {
+            return Some((e.clone(), true));
+        }
+        let e = self.engine.as_ref()?;
+        if self.engine_started.elapsed().as_secs_f32() > 2.0 && e.shared.in_frames.load(Ordering::Relaxed) == 0 {
+            let why = crate::audio::alsa_card_with("BANDFUSE")
+                .and_then(|c| crate::audio::alsa_capture_owner(&c))
+                .filter(|(_, comm)| comm != "pipewire" && comm != "wireplumber")
+                .map(|(pid, comm)| format!(": BANDFUSE opened directly by {comm} (pid {pid})"))
+                .unwrap_or_else(|| " - the adapter may be held exclusively by another program".into());
+            return Some((format!("No data from the input{why}"), true));
+        }
+        e.info.warning.clone().map(|w| (w, false))
     }
 
     pub fn rebuild_chain(&mut self) {
@@ -146,8 +168,8 @@ impl Game {
     }
 
     pub fn refresh_lists(&mut self) {
-        self.lists.inputs = crate::audio::list_devices(true);
-        self.lists.outputs = crate::audio::list_devices(false);
+        self.lists.inputs = crate::audio::list_devices(true, self.lists.show_all);
+        self.lists.outputs = crate::audio::list_devices(false, self.lists.show_all);
         self.lists.nams = crate::monitor::list_assets(&self.cfg.tone.asset_dir, ".nam");
         self.lists.irs = crate::monitor::list_assets(&self.cfg.tone.asset_dir, ".wav");
     }

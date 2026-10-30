@@ -22,24 +22,24 @@ pub fn draw(g: &mut Game, p: &mut Paint) {
     let (x, w) = (32.0, 440.0);
     p.panel(x, 84.0, w, 790.0);
     p.label(x + 16.0, 104.0, "input device");
+    p.text(x + 150.0, 104.0, "shared = via PipeWire, direct = exclusive ALSA", 11.0, col::FAINT, Align::Left);
     let mut restart = false;
     let mut y = 120.0;
-    if p.choice(x + 16.0, y, w - 32.0, 30.0, "Auto (first BANDFUSE, else default)", g.cfg.audio.input_device.is_none()) {
+    if p.choice(x + 16.0, y, w - 32.0, 30.0, "Auto (BANDFUSE: shared, else direct)", g.cfg.audio.input_device.is_none()) {
         g.cfg.audio.input_device = None;
         restart = true;
     }
     y += 34.0;
-    // Show BANDFUSE devices first, then the rest; scroll with the wheel.
-    let mut inputs = g.lists.inputs.clone();
-    inputs.sort_by_key(|d| !d.label.contains("BANDFUSE"));
-    let visible = 11;
+    // Shared (PipeWire) devices first, then one direct ALSA entry per card; scroll with the wheel.
+    let inputs = g.lists.inputs.clone();
+    let visible = 10;
     if p.hover(x, y, w, visible as f32 * 34.0) && p.scroll != 0.0 {
         let max = inputs.len().saturating_sub(visible);
         g.lists.input_scroll = if p.scroll < 0.0 { (g.lists.input_scroll + 1).min(max) } else { g.lists.input_scroll.saturating_sub(1) };
     }
     for d in inputs.iter().skip(g.lists.input_scroll).take(visible) {
         let sel = g.cfg.audio.input_device.as_deref() == Some(d.id.as_str());
-        if p.choice(x + 16.0, y, w - 32.0, 30.0, &truncate(&d.label, 52), sel) {
+        if p.choice(x + 16.0, y, w - 32.0, 30.0, &d.label, sel) {
             g.cfg.audio.input_device = Some(d.id.clone());
             restart = true;
         }
@@ -47,6 +47,11 @@ pub fn draw(g: &mut Game, p: &mut Paint) {
     }
     if inputs.len() > visible {
         p.text(x + w - 20.0, 104.0, format!("scroll {}/{}", g.lists.input_scroll + 1, inputs.len() - visible + 1), 11.0, col::FAINT, Align::Right);
+    }
+    if p.choice(x + 16.0, 500.0, 260.0, 26.0, "show all ALSA devices", g.lists.show_all) {
+        g.lists.show_all = !g.lists.show_all;
+        g.lists.input_scroll = 0;
+        g.refresh_lists();
     }
     y = 556.0;
     p.label(x + 16.0, y, "input channel");
@@ -77,11 +82,13 @@ pub fn draw(g: &mut Game, p: &mut Paint) {
             Align::Left,
         );
     }
-    if let Some(w) = g.engine.as_ref().and_then(|e| e.info.warning.clone()) {
-        p.text(x + 16.0, y + 214.0, truncate(&w, 54), 12.0, col::LATE, Align::Left);
-    }
-    if let Some(e) = &g.engine_err {
-        p.text(x + 16.0, y + 196.0, truncate(e, 54), 12.0, col::MISS, Align::Left);
+    if let Some((msg, bad)) = g.input_problem() {
+        for (i, line) in msg.split("; ").take(3).enumerate() {
+            p.text(x + 16.0, y + 194.0 + i as f32 * 16.0, truncate(line, 58), 12.0, if bad { col::MISS } else { col::LATE }, Align::Left);
+        }
+        if p.button(x + w - 106.0, y + 246.0, 90.0, 30.0, "Retry", false) {
+            restart = true;
+        }
     }
 
     // --- Tone column
@@ -161,9 +168,9 @@ pub fn draw(g: &mut Game, p: &mut Paint) {
     }
     y += 34.0;
     let outs = g.lists.outputs.clone();
-    for d in outs.iter().filter(|d| !d.id.contains("null") && !d.label.contains("Rate Converter")).take(8) {
+    for d in outs.iter().take(8) {
         let sel = g.cfg.audio.output_device.as_deref() == Some(d.id.as_str());
-        if p.choice(x + 16.0, y, w - 32.0, 30.0, &truncate(&d.label, 54), sel) {
+        if p.choice(x + 16.0, y, w - 32.0, 30.0, &d.label, sel) {
             g.cfg.audio.output_device = Some(d.id.clone());
             restart = true;
         }

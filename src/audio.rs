@@ -40,64 +40,215 @@ impl Default for AudioSettings {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeviceKind {
+    /// Through PipeWire/PulseAudio: shared with other programs.
+    Shared,
+    /// One ALSA hardware device per card (exclusive, lowest latency).
+    Direct,
+    /// ALSA aliases and plugin pseudo-devices (only with "show all").
+    Other,
+}
+
 #[derive(Clone, Debug)]
 pub struct DeviceEntry {
+    /// Host-qualified cpal id, e.g. `pulseaudio:alsa_input.usb-...` or `alsa:plughw:CARD=Adapter,DEV=0`.
     pub id: String,
     pub label: String,
+    pub kind: DeviceKind,
+}
+
+fn device_name(d: &cpal::Device) -> String {
+    d.description().map(|x| x.name().to_owned()).unwrap_or_else(|_| "?".into())
 }
 
 fn device_label(d: &cpal::Device) -> String {
-    match d.description() {
-        Ok(desc) => {
-            let mut s = desc.name().to_owned();
-            if let Some(extra) = desc.extended().nth(1) {
-                s.push_str(" - ");
-                s.push_str(extra);
-            }
-            s
-        }
-        Err(_) => "?".into(),
-    }
+    let id = device_id(d).unwrap_or_default();
+    format!("{} [{id}]", device_name(d))
 }
 
+/// Host-qualified id string (`host:device`).
 fn device_id(d: &cpal::Device) -> Option<String> {
-    d.id().ok().map(|i| i.id().to_owned())
+    d.id().ok().map(|i| i.to_string())
 }
 
-pub fn list_devices(input: bool) -> Vec<DeviceEntry> {
-    let host = cpal::default_host();
-    let devs = if input { host.input_devices() } else { host.output_devices() };
-    devs.map(|ds| {
-        ds.filter_map(|d| {
-            let id = device_id(&d)?;
-            let name = d.description().map(|x| x.name().to_owned()).unwrap_or_default();
-            let short = name.replace("BANDFUSE USB Guitar Adapter", "BANDFUSE");
-            Some(DeviceEntry { label: format!("{short}  [{id}]"), id })
-        })
-            .collect()
-    })
-    .unwrap_or_default()
-}
-
-fn find_input(host: &cpal::Host, want: Option<&str>) -> Vec<cpal::Device> {
-    let all: Vec<cpal::Device> = host.input_devices().map(|d| d.collect()).unwrap_or_default();
-    if let Some(w) = want {
-        return all.into_iter().filter(|d| device_id(d).as_deref() == Some(w)).collect();
+/// Settings written before ids were host-qualified hold bare ALSA ids.
+fn qualify(id: &str) -> String {
+    if id.starts_with("alsa:") || id.starts_with("pulseaudio:") || id.starts_with("jack:") || id.starts_with("pipewire:") {
+        id.to_string()
+    } else {
+        format!("alsa:{id}")
     }
-    let mut cands: Vec<cpal::Device> = all.into_iter().filter(|d| device_label(d).contains("BANDFUSE")).collect();
+}
+
+fn hosts() -> Vec<cpal::Host> {
+    cpal::available_hosts().into_iter().filter_map(|h| cpal::host_from_id(h).ok()).collect()
+}
+
+fn all_devices(input: bool) -> Vec<cpal::Device> {
+    let mut v = Vec::new();
+    for h in hosts() {
+        if let Ok(ds) = if input { h.input_devices() } else { h.output_devices() } {
+            v.extend(ds);
+        }
+    }
+    v
+}
+
+fn card_of(alsa_id: &str) -> Option<&str> {
+    let rest = alsa_id.split("CARD=").nth(1)?;
+    Some(rest.split(',').next().unwrap_or(rest))
+}
+
+/// Classify a device: PulseAudio sources/sinks are shared (monitors are hidden), ALSA
+/// devices collapse to one `plughw:CARD=<name>` entry per card, everything else is "other".
+fn kind_of(id: &str, name: &str, chosen_per_card: &std::collections::HashMap<String, String>) -> Option<DeviceKind> {
+    if let Some(pid) = id.strip_prefix("pulseaudio:") {
+        return if pid.ends_with(".monitor") { None } else { Some(DeviceKind::Shared) };
+    }
+    if chosen_per_card.get(name).is_some_and(|c| c == id) {
+        return Some(DeviceKind::Direct);
+    }
+    Some(DeviceKind::Other)
+}
+
+/// Per card name, the ALSA id to show as its direct entry: plughw with a named card, else hw.
+fn direct_choices(devs: &[cpal::Device]) -> std::collections::HashMap<String, String> {
+    let mut best: std::collections::HashMap<String, (u8, String)> = std::collections::HashMap::new();
+    for d in devs {
+        let Some(id) = device_id(d) else { continue };
+        let Some(aid) = id.strip_prefix("alsa:") else { continue };
+        let Some(card) = card_of(aid) else { continue };
+        let named = !card.chars().all(|c| c.is_ascii_digit());
+        let rank = match (aid.starts_with("plughw:"), aid.starts_with("hw:"), named) {
+            (true, _, true) => 0,
+            (_, true, true) => 1,
+            (true, _, false) => 2,
+            (_, true, false) => 3,
+            _ => continue,
+        };
+        let name = device_name(d);
+        if best.get(&name).is_none_or(|(r, _)| rank < *r) {
+            best.insert(name, (rank, id));
+        }
+    }
+    best.into_iter().map(|(k, (_, id))| (k, id)).collect()
+}
+
+pub fn list_devices(input: bool, show_all: bool) -> Vec<DeviceEntry> {
+    let devs = all_devices(input);
+    let chosen = direct_choices(&devs);
+    let mut out: Vec<DeviceEntry> = devs
+        .iter()
+        .filter_map(|d| {
+            let id = device_id(d)?;
+            let name = device_name(d);
+            let kind = kind_of(&id, &name, &chosen)?;
+            if kind == DeviceKind::Other && !show_all {
+                return None;
+            }
+            let label = match kind {
+                DeviceKind::Shared => format!("shared  {name}"),
+                DeviceKind::Direct => format!("direct  {}", name.trim_end_matches(", USB Audio")),
+                DeviceKind::Other => format!("{name} [{id}]"),
+            };
+            Some(DeviceEntry { id, label, kind })
+        })
+        .collect();
+    out.sort_by_key(|e| (e.kind as u8, !e.label.contains("BANDFUSE")));
+    out
+}
+
+/// Who holds an ALSA card's capture device open, from /proc/asound (pid, program name).
+pub fn alsa_capture_owner(card: &str) -> Option<(u32, String)> {
+    for e in std::fs::read_dir("/proc/asound").ok()?.flatten() {
+        let path = e.path();
+        let id = std::fs::read_to_string(path.join("id")).unwrap_or_default();
+        let num = e.file_name().to_string_lossy().trim_start_matches("card").to_string();
+        if id.trim() != card && num != card {
+            continue;
+        }
+        for pcm in std::fs::read_dir(&path).ok()?.flatten() {
+            let n = pcm.file_name().to_string_lossy().to_string();
+            if !(n.starts_with("pcm") && n.ends_with('c')) {
+                continue;
+            }
+            for sub in std::fs::read_dir(pcm.path()).ok()?.flatten() {
+                let st = std::fs::read_to_string(sub.path().join("status")).unwrap_or_default();
+                let pid = st.lines().find_map(|l| l.strip_prefix("owner_pid").map(|v| v.trim_start_matches([' ', ':']).trim().to_string()));
+                if let Some(pid) = pid.and_then(|p| p.parse::<u32>().ok()) {
+                    let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default().trim().to_string();
+                    return Some((pid, comm));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// ALSA card id (e.g. `Adapter`) of the first card whose description contains `needle`.
+pub fn alsa_card_with(needle: &str) -> Option<String> {
+    let cards = std::fs::read_to_string("/proc/asound/cards").ok()?;
+    let line = cards.lines().find(|l| l.contains(needle))?;
+    let num = line.split_whitespace().next()?;
+    std::fs::read_to_string(format!("/proc/asound/card{num}/id")).ok().map(|s| s.trim().to_string())
+}
+
+/// Explain why a device that should be there could not be used, from /proc/asound.
+pub fn explain_missing(alsa_card: &str, label: &str) -> String {
+    match alsa_capture_owner(alsa_card) {
+        Some((pid, comm)) if comm != "pipewire" && comm != "wireplumber" => {
+            format!("{label} busy: opened directly by {comm} (pid {pid}); close it there or use the shared device")
+        }
+        Some((pid, comm)) => format!("{label} busy: held by {comm} (pid {pid}); use the shared device"),
+        None => format!("{label} not available"),
+    }
+}
+
+/// Input candidates in the order to try. Auto: BANDFUSE through PipeWire (shared), then
+/// direct ALSA. Returns (candidates, adapter present?).
+fn find_input(want: Option<&str>) -> (Vec<cpal::Device>, bool) {
+    let all = all_devices(true);
+    if let Some(w) = want {
+        let w = qualify(w);
+        let v: Vec<cpal::Device> = all.into_iter().filter(|d| device_id(d).as_deref() == Some(w.as_str())).collect();
+        let present = !v.is_empty();
+        return (v, present);
+    }
+    let chosen = direct_choices(&all);
     let rank = |d: &cpal::Device| {
         let id = device_id(d).unwrap_or_default();
-        if id.starts_with("hw:") {
-            0
-        } else if id.starts_with("plughw:") {
-            1
+        if id.starts_with("pulseaudio:") && !id.ends_with(".monitor") {
+            Some(0)
+        } else if chosen.values().any(|c| *c == id) {
+            Some(1)
+        } else if id.starts_with("alsa:hw:") {
+            Some(2)
         } else {
-            2
+            None
         }
     };
-    cands.sort_by_key(rank);
-    cands.extend(host.default_input_device());
-    cands
+    let mut cands: Vec<(u8, cpal::Device)> =
+        all.into_iter().filter(|d| device_name(d).contains("BANDFUSE")).filter_map(|d| rank(&d).map(|r| (r, d))).collect();
+    cands.sort_by_key(|(r, _)| *r);
+    let present = !cands.is_empty();
+    (cands.into_iter().map(|(_, d)| d).collect(), present)
+}
+
+fn describe_open_error(dev: &cpal::Device, e: &str, busy: bool) -> String {
+    let name = device_name(dev).replace(", USB Audio", "");
+    let id = device_id(dev).unwrap_or_default();
+    if busy || e.to_lowercase().contains("busy") {
+        let owner = id
+            .strip_prefix("alsa:")
+            .and_then(card_of)
+            .and_then(alsa_capture_owner)
+            .map(|(pid, comm)| format!(" by {comm} (pid {pid})"))
+            .unwrap_or_default();
+        format!("{name} busy: in use{owner}")
+    } else {
+        format!("{name} [{id}]: {e}")
+    }
 }
 
 /// f32 stored in an AtomicU32.
@@ -219,7 +370,7 @@ fn buffer_size(want: u32, sup: &cpal::SupportedBufferSize) -> cpal::BufferSize {
 }
 
 enum InputHandle {
-    Device(cpal::Stream),
+    Device(#[allow(dead_code)] cpal::Stream),
     /// Synthesised guitar for headless testing (`GG_FAKE_INPUT=1`).
     Fake(Arc<AtomicBool>),
 }
@@ -372,6 +523,7 @@ fn build_streams(
 ) -> Result<(Streams, EngineInfo), String> {
     let host = cpal::default_host();
     let (mon_tx, mon_rx) = rtrb::RingBuffer::<f32>::new(8192);
+    let mut errors: Vec<String> = Vec::new();
 
     // Input: try candidates until one opens.
     let mut last_err = String::from("no input device found");
@@ -379,7 +531,7 @@ fn build_streams(
     let mut raw_tx = Some(raw_tx);
     let mut mon_tx = Some(mon_tx);
     let fake = std::env::var_os("GG_FAKE_INPUT").is_some();
-    let candidates = if fake { Vec::new() } else { find_input(&host, s.input_device.as_deref()) };
+    let (candidates, present) = if fake { (Vec::new(), true) } else { find_input(s.input_device.as_deref()) };
     for dev in candidates {
         let Ok(cfgs) = dev.supported_input_configs() else { continue };
         let Some((cfg, bs)) = pick_config(cfgs.collect(), SAMPLE_RATE, s.input_channel + 1, 1) else {
@@ -401,8 +553,9 @@ fn build_streams(
                 input = Some((stream, device_label(&dev), sc));
                 break;
             }
-            Err((e, st)) => {
-                last_err = format!("{}: {e}", device_label(&dev));
+            Err((e, busy, st)) => {
+                last_err = describe_open_error(&dev, &e, busy);
+                errors.push(last_err.clone());
                 raw_tx = Some(st.raw);
                 mon_tx = Some(st.mon);
             }
@@ -412,26 +565,64 @@ fn build_streams(
         let state = InState { shared: Arc::clone(shared), raw: raw_tx.take().unwrap(), mon: mon_tx.take().unwrap(), scratch: vec![0.0; 16384], frame: 0 };
         (InputHandle::Fake(spawn_fake_input(state)), "FAKE INPUT (synthesised eighths)".to_string(), "128".to_string())
     } else {
-        let (st, label, cfg) = input.ok_or(last_err)?;
-        (InputHandle::Device(st), label, format!("{:?}", cfg.buffer_size))
+        match input {
+            Some((st, label, cfg)) => (InputHandle::Device(st), label, format!("{:?}", cfg.buffer_size)),
+            None if s.input_device.is_none() && !present => {
+                // No adapter at all: open the default input for the meter, monitoring muted.
+                let dev = host.default_input_device().ok_or("BANDFUSE adapter not found and no default input")?;
+                let cfgs = dev.supported_input_configs().map_err(|e| e.to_string())?;
+                let (cfg, bs) = pick_config(cfgs.collect(), SAMPLE_RATE, 1, 1).ok_or("default input: no 48 kHz config")?;
+                let mut sc: cpal::StreamConfig = cfg.config();
+                sc.buffer_size = buffer_size(s.buffer_frames, &bs);
+                let ch = sc.channels as usize;
+                let state = InState { shared: Arc::clone(shared), raw: raw_tx.take().unwrap(), mon: mon_tx.take().unwrap(), scratch: vec![0.0; 16384], frame: 0 };
+                let r = match cfg.sample_format() {
+                    cpal::SampleFormat::F32 => build_in::<f32>(&dev, sc.clone(), ch, 0, state),
+                    cpal::SampleFormat::I32 => build_in::<i32>(&dev, sc.clone(), ch, 0, state),
+                    _ => build_in::<i16>(&dev, sc.clone(), ch, 0, state),
+                };
+                let st = r.map_err(|(e, _, _)| format!("default input: {e}"))?;
+                (InputHandle::Device(st), device_label(&dev), format!("{:?}", sc.buffer_size))
+            }
+            None => {
+                let msg = if !errors.is_empty() {
+                    errors.join("; ")
+                } else if let Some(card) = s.input_device.as_deref().map(qualify).as_deref().and_then(|i| i.strip_prefix("alsa:")).and_then(card_of) {
+                    // ALSA hides a busy device from enumeration.
+                    explain_missing(card, &format!("ALSA device {card}"))
+                } else {
+                    last_err
+                };
+                return Err(msg);
+            }
+        }
     };
     let mut warning = None;
-    if !fake && s.input_device.is_none() && !in_label.contains("BANDFUSE") {
-        warning = Some("BANDFUSE adapter not found - using the default input; monitoring muted".to_string());
+    if !fake && s.input_device.is_none() && !present {
+        warning = Some("BANDFUSE adapter not found (not plugged in?) - using the default input; monitoring muted".to_string());
         shared.monitor_on.store(false, Ordering::Relaxed);
     }
+    let input_is_pulse = in_label.contains("[pulseaudio:");
 
-    let (out_handle, out_label, out_buffer) = if fake {
+    let fake_out = fake || std::env::var_os("GG_FAKE_OUTPUT").is_some();
+    let (out_handle, out_label, out_buffer) = if fake_out {
         let st = OutState { shared: Arc::clone(shared), mon: mon_rx, frame: 0, scratch: vec![0.0; 16384] };
         (OutputHandle::Fake(spawn_fake_output(st)), "FAKE OUTPUT (silent)".to_string(), "128".to_string())
     } else {
+        // Default output: same host as the input, so both streams share one clock domain.
+        let default_out = || {
+            if input_is_pulse {
+                cpal::host_from_id(cpal::HostId::PulseAudio).ok().and_then(|h| h.default_output_device()).or_else(|| host.default_output_device())
+            } else {
+                host.default_output_device()
+            }
+        };
         let out_dev = match &s.output_device {
-            Some(id) => host
-                .output_devices()
-                .ok()
-                .and_then(|mut ds| ds.find(|d| device_id(d).as_deref() == Some(id)))
-                .or_else(|| host.default_output_device()),
-            None => host.default_output_device(),
+            Some(id) => {
+                let id = qualify(id);
+                all_devices(false).into_iter().find(|d| device_id(d).as_deref() == Some(id.as_str())).or_else(default_out)
+            }
+            None => default_out(),
         }
         .ok_or("no output device")?;
         let cfgs = out_dev.supported_output_configs().map_err(|e| e.to_string())?;
@@ -449,9 +640,6 @@ fn build_streams(
         out_stream.play().map_err(|e| format!("output play: {e}"))?;
         (OutputHandle::Device(out_stream), device_label(&out_dev), format!("{:?}", sc.buffer_size))
     };
-    if let InputHandle::Device(st) = &in_stream {
-        st.play().map_err(|e| format!("input play: {e}"))?;
-    }
     let info = EngineInfo {
         sample_rate: SAMPLE_RATE,
         input_label: in_label,
@@ -523,7 +711,7 @@ fn build_in<T>(
     ch: usize,
     sel: usize,
     st: InState,
-) -> Result<cpal::Stream, (String, InState)>
+) -> Result<cpal::Stream, (String, bool, InState)>
 where
     T: cpal::SizedSample,
     f32: cpal::FromSample<T>,
@@ -557,15 +745,21 @@ where
         |e| eprintln!("input stream error: {e}"),
         None,
     );
-    match r {
-        Ok(s) => Ok(s),
-        Err(e) => {
-            let st = slot.lock().ok().and_then(|mut s| s.take());
-            match st {
-                Some(st) => Err((e.to_string(), st)),
-                None => panic!("input state lost after failed build: {e}"),
+    let err = match r {
+        Ok(s) => match s.play() {
+            Ok(()) => return Ok(s),
+            Err(e) => {
+                drop(s);
+                e
             }
-        }
+        },
+        Err(e) => e,
+    };
+    let busy = err.kind() == cpal::ErrorKind::DeviceBusy;
+    let st = slot.lock().ok().and_then(|mut s| s.take());
+    match st {
+        Some(st) => Err((err.to_string(), busy, st)),
+        None => panic!("input state lost after failed open: {err}"),
     }
 }
 
