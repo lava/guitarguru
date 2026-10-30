@@ -33,7 +33,12 @@ pub struct NoteResult {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SlotStat {
+    /// Flat slot id (see the run's slot table).
     pub slot: usize,
+    /// Pattern id and slot within that pattern's bar (filled in by the session).
+    pub pattern: String,
+    pub slot_in_pattern: usize,
+    pub pos16: f64,
     pub count: usize,
     pub mean_ms: f64,
     pub std_ms: f64,
@@ -212,7 +217,14 @@ pub fn score(inp: &ScoreInput) -> ScoreReport {
         .map(|(slot, v)| {
             let (m, s) = (mean(v), std(v));
             let t = if s > 0.0 { m / (s / (v.len() as f64).sqrt()) } else { 0.0 };
-            SlotStat { slot, count: v.len(), mean_ms: m, std_ms: s, consistent: v.len() >= 4 && t.abs() > 3.0 && m.abs() > 3.0 }
+            SlotStat {
+                slot,
+                count: v.len(),
+                mean_ms: m,
+                std_ms: s,
+                consistent: v.len() >= 4 && t.abs() > 3.0 && m.abs() > 3.0,
+                ..Default::default()
+            }
         })
         .collect();
     let slot_mean: Vec<f64> = rep.slots.iter().map(|s| s.mean_ms).collect();

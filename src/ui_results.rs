@@ -3,7 +3,7 @@
 
 use crate::game::{Game, ResultsState, Screen};
 use crate::paint::{Align, Paint, col};
-use crate::patterns::{BPM_MAX, BPM_STEP, PATTERNS, bar_seconds, sixteenth_seconds};
+use crate::patterns::{BPM_MAX, BPM_STEP, Level, LevelKind, PATTERNS, bar_seconds, sixteenth_seconds};
 use crate::progress::PASS_THRESHOLD;
 use crate::score::ScoreReport;
 use crate::session::Window;
@@ -36,7 +36,7 @@ pub fn draw(g: &mut Game, p: &mut Paint) {
     let pass = rep.combined_pct >= PASS_THRESHOLD;
     p.text(cx, cy - 10.0, format!("{:.0}", rep.combined_pct), 60.0, if pass { col::BRASS } else { col::TEXT }, Align::Center);
     p.text(cx, cy + 34.0, if pass { "PASSED".to_string() } else { format!("pass at {PASS_THRESHOLD:.0}") }, 15.0, col::DIM, Align::Center);
-    p.text(cx, 284.0, format!("{} - {} BPM", r.run.pattern.name, r.run.plan.bpm), 14.0, col::DIM, Align::Center);
+    p.text(cx, 284.0, format!("{} - {} BPM", r.run.level.name(), r.run.plan.bpm), 14.0, col::DIM, Align::Center);
 
     // ---------- timing & tone bars
     p.panel(330.0, 16.0, 430.0, 290.0);
@@ -71,7 +71,7 @@ pub fn draw(g: &mut Game, p: &mut Paint) {
         p.text(350.0, 222.0, if pass { "nothing new" } else { "score 80 to unlock" }, 14.0, col::FAINT, Align::Left);
     }
     for k in &r.newly {
-        let label = chip_label(k);
+        let label = format!("{} {}", k.name().replace(" track", ""), k.bpm);
         let w = 12.0 + label.len() as f32 * 8.0;
         if x + w > 750.0 {
             break;
@@ -120,10 +120,10 @@ pub fn draw(g: &mut Game, p: &mut Paint) {
     if p.button(1194.0, 16.0, 226.0, 52.0, "Retry  (Space)", true) {
         action = Action::Retry;
     }
-    if let Some((pi, bpm)) = next_level(g, r) {
-        let label = format!("Next: {} {}", truncate(PATTERNS[pi].name, 11), bpm);
+    if let Some(l) = next_level(g, r) {
+        let label = format!("Next: {} {}", truncate(&l.name().replace(" track", ""), 11), l.bpm);
         if p.button(1194.0, 78.0, 226.0, 44.0, &label, false) {
-            action = Action::Start(pi, bpm);
+            action = Action::Start(l);
         }
     }
     if p.button(1194.0, 132.0, 226.0, 44.0, "Level select  (Esc)", false) {
@@ -166,10 +166,10 @@ pub fn draw(g: &mut Game, p: &mut Paint) {
             g.stop_listen();
             g.screen = Screen::Menu;
         }
-        Action::Start(pi, bpm) => {
+        Action::Start(l) => {
             g.stop_listen();
-            g.selected = (pi, bpm);
-            g.start_level(&PATTERNS[pi], bpm, false);
+            g.selected = l;
+            g.start_level(l, false);
         }
         Action::Listen(i) => g.listen(i),
         Action::StopListen => g.stop_listen(),
@@ -186,29 +186,22 @@ enum Action {
     None,
     Retry,
     Menu,
-    Start(usize, u32),
+    Start(Level),
     Listen(usize),
     StopListen,
 }
 
-fn chip_label(key: &str) -> String {
-    let (id, bpm) = key.split_once('@').unwrap_or((key, ""));
-    let name = PATTERNS.iter().find(|p| p.id == id).map_or(id, |p| p.name);
-    format!("{name} {bpm}")
-}
-
-fn next_level(g: &Game, r: &ResultsState) -> Option<(usize, u32)> {
-    let pi = PATTERNS.iter().position(|p| p.id == r.run.pattern.id)?;
-    let bpm = r.run.plan.bpm;
-    // Prefer the newly unlocked next tier, then the faster tempo, else any unlocked level.
-    let next_tier = PATTERNS.iter().enumerate().find(|(_, p)| p.tier == r.run.pattern.tier + 1 && g.progress.is_unlocked(p.id, bpm));
-    if let Some((i, _)) = next_tier {
-        return Some((i, bpm));
+fn next_level(g: &Game, r: &ResultsState) -> Option<Level> {
+    let l = r.run.level;
+    // Prefer the next tier's track at this tempo, then the same level 20 BPM faster.
+    if let LevelKind::Track(t) = l.kind {
+        let n = Level::track(t + 1, l.bpm);
+        if t < crate::progress::max_tier() && g.progress.is_unlocked(&n) {
+            return Some(n);
+        }
     }
-    if bpm + BPM_STEP <= BPM_MAX && g.progress.is_unlocked(r.run.pattern.id, bpm + BPM_STEP) {
-        return Some((pi, bpm + BPM_STEP));
-    }
-    None
+    let faster = Level { kind: l.kind, bpm: l.bpm + BPM_STEP };
+    (faster.bpm <= BPM_MAX && g.progress.is_unlocked(&faster)).then_some(faster)
 }
 
 fn window_problems(rep: &ScoreReport, w: &Window) -> Vec<(String, bevy::color::Color)> {
@@ -258,9 +251,11 @@ fn weak_card(p: &mut Paint, r: &ResultsState, i: usize, w: &Window, x: f32, y: f
     }
     // playback progress
     let prog = playing.map(|(pos, len)| pos as f64 / len.max(1) as f64);
-    p.rect(x + 110.0, y + 55.0, cw - 126.0, 4.0, col::LINE);
+    p.text(x + 110.0, y + 50.0, PATTERNS[w.pattern].name, 14.0, col::TEXT, Align::Left);
+    pattern_glyph(p, x + cw - 136.0, y + 44.0, 120.0, 10.0, &PATTERNS[w.pattern], col::DIM);
+    p.rect(x + 110.0, y + 66.0, cw - 126.0, 4.0, col::LINE);
     if let Some(f) = prog {
-        p.rect(x + 110.0, y + 55.0, (cw - 126.0) * f as f32, 4.0, col::BRASS);
+        p.rect(x + 110.0, y + 66.0, (cw - 126.0) * f as f32, 4.0, col::BRASS);
     }
     // problem chips
     let mut cx = x + 16.0;
@@ -384,27 +379,40 @@ fn timing_panel(p: &mut Paint, r: &ResultsState, x: f32, y: f32, w: f32, h: f32)
     p.text(hx + hw / 2.0, hy + hh + 12.0, "0", 11.0, col::FAINT, Align::Center);
     p.text(hx + hw, hy + hh + 12.0, "+70 ms", 11.0, col::FAINT, Align::Right);
 
-    // per-slot mean deviation
-    let (px, py, pw, ph) = (x + 640.0, y + 36.0, w - 660.0, 90.0);
-    p.label(px, py - 16.0, "per slot (mean ms)");
-    let n = rep.slots.len().max(1);
-    let sw2 = pw / n as f32;
-    let mid = py + ph / 2.0;
-    p.rect(px, mid, pw, 1.0, col::LINE);
+    // per-slot mean deviation, one row per pattern (slots differ between patterns)
+    let (px, py, pw, ph) = (x + 640.0, y + 36.0, w - 660.0, 120.0);
+    p.label(px, py - 16.0, "per slot, per pattern (mean ms)");
+    let mut pats: Vec<(String, usize)> = Vec::new();
     for s in &rep.slots {
-        let hgt = (s.mean_ms * 2.0).clamp(-ph as f64 / 2.0, ph as f64 / 2.0) as f32;
-        let c = if s.consistent { dev_color(s.mean_ms * 10.0) } else { col::DIM };
-        let bx = px + s.slot as f32 * sw2 + 2.0;
-        if hgt >= 0.0 {
-            p.rect(bx, mid, sw2 - 4.0, hgt.max(1.0), c);
-        } else {
-            p.rect(bx, mid + hgt, sw2 - 4.0, -hgt, c);
+        match pats.iter_mut().find(|(id, _)| *id == s.pattern) {
+            Some(e) => e.1 += s.count,
+            None => pats.push((s.pattern.clone(), s.count)),
         }
-        let hit = r.run.pattern.hits();
-        let lbl = hit.get(s.slot).map(bar_label).unwrap_or("");
-        p.text(bx + (sw2 - 4.0) / 2.0, py + ph + 12.0, lbl, 11.0, col::FAINT, Align::Center);
     }
-    p.text(px, py + ph + 28.0, "colored = consistently early/late", 11.0, col::FAINT, Align::Left);
+    pats.sort_by_key(|e| std::cmp::Reverse(e.1));
+    pats.truncate(4);
+    let rows = pats.len().max(1);
+    let rh = ph / rows as f32;
+    let (gx, gw) = (px + 110.0, pw - 110.0);
+    for (ri, (id, _)) in pats.iter().enumerate() {
+        let ry = py + ri as f32 * rh;
+        let mid = ry + rh / 2.0;
+        let name = PATTERNS.iter().find(|q| q.id == *id).map_or(id.as_str(), |q| q.name);
+        p.text(px, mid, truncate(name, 13), 11.0, col::DIM, Align::Left);
+        p.rect(gx, mid, gw, 1.0, col::LINE);
+        for s in rep.slots.iter().filter(|s| s.pattern == *id) {
+            let hgt = (s.mean_ms * 1.2).clamp(-(rh as f64) / 2.0 + 1.0, rh as f64 / 2.0 - 1.0) as f32;
+            let c = if s.consistent { dev_color(s.mean_ms * 10.0) } else { col::DIM };
+            let bx = gx + gw * (s.pos16 as f32 / 16.0);
+            let bw = (gw / 16.0 - 3.0).max(2.0);
+            if hgt >= 0.0 {
+                p.rect(bx, mid, bw, hgt.max(1.0), c);
+            } else {
+                p.rect(bx, mid + hgt, bw, -hgt, c);
+            }
+        }
+    }
+    p.text(px, py + ph + 14.0, "16th grid; color = consistent bias", 11.0, col::FAINT, Align::Left);
 
     // drift line with jitter band and pins at weak sections
     let (dx, dy, dw, dh) = (x + 16.0, y + 190.0, w - 32.0, 130.0);

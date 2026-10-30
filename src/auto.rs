@@ -1,5 +1,5 @@
 //! Scripted runs for headless verification, driven by environment variables:
-//! `GG_AUTOPLAY=pattern@bpm` starts that level, `GG_SHOTS=3,9.5` saves screenshots at those
+//! `GG_AUTOPLAY=tier2@120` (track) or `GG_AUTOPLAY=gallop@120` (drill) starts that level, `GG_SHOTS=3,9.5` saves screenshots at those
 //! seconds to `GG_SHOT_DIR` (default `.`), `GG_END_AT=8` ends the run early (scores the
 //! full bars played so far), `GG_LISTEN_AT=10` starts listen-back of the worst section,
 //! `GG_FAKE_OUTPUT=1` replaces only the output with a silent one, `GG_EXIT_AT=12` quits, `GG_SCREEN=settings` opens the settings screen.
@@ -8,7 +8,7 @@ use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 
 use crate::game::Game;
-use crate::patterns::pattern_by_id;
+use crate::patterns::Level;
 
 #[derive(Resource)]
 pub struct Auto {
@@ -51,9 +51,9 @@ pub fn auto_system(mut auto: ResMut<Auto>, mut game: ResMut<Game>, time: Res<Tim
     let crossed = |at: f32| prev < at && now >= at;
     if prev == 0.0
         && let Some((p, b)) = auto.autoplay.clone()
-        && let Some(pat) = pattern_by_id(&p)
+        && let Some(level) = Level::from_key(&format!("{p}@{b}"))
     {
-        game.start_level(pat, b, false);
+        game.start_level(level, false);
     }
     if prev == 0.0 && std::env::var("GG_SCREEN").as_deref() == Ok("settings") {
         game.refresh_lists();

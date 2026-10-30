@@ -8,12 +8,12 @@ use serde::Serialize;
 use crate::audio::{ClickPlan, render_click};
 use crate::detect::{DetectParams, Onset, detect};
 use crate::monitor::{Chain, ToneSettings};
-use crate::patterns::{BEATS_PER_BAR, GridNote, Pattern, SessionPlan, bar_seconds, beat_seconds, sixteenth_seconds};
+use crate::patterns::{BEATS_PER_BAR, GridNote, Level, PATTERNS, SessionPlan, bar_seconds, beat_seconds, sixteenth_seconds};
 use crate::progress::data_dir;
 use crate::score::{GridIn, ScoreInput, ScoreReport, score};
 
 pub struct RunData {
-    pub pattern: &'static Pattern,
+    pub level: Level,
     pub plan: SessionPlan,
     pub sample_rate: u32,
     /// Raw DI, starting at the recording start.
@@ -37,6 +37,9 @@ pub struct Window {
     /// Indices into `ScoreReport::notes`.
     pub notes: Vec<usize>,
     pub n_extra: usize,
+    /// Pattern played in this window (index into `PATTERNS`); windows never span a switch.
+    pub pattern: usize,
+    pub pattern_id: &'static str,
 }
 
 impl RunData {
@@ -50,20 +53,51 @@ impl RunData {
         (rep, onsets)
     }
 
+    /// Patterns used in this run, in order of first appearance.
+    pub fn patterns_used(&self) -> Vec<usize> {
+        let mut v: Vec<usize> = Vec::new();
+        for &p in &self.plan.bar_patterns {
+            if !v.contains(&p) {
+                v.push(p);
+            }
+        }
+        v
+    }
+
+    /// Flat slot table: one entry per (pattern, slot within the pattern's bar). Per-slot
+    /// statistics are per pattern, since a slot means something different in each.
+    pub fn slot_table(&self) -> Vec<(usize, usize)> {
+        self.patterns_used().into_iter().flat_map(|p| (0..PATTERNS[p].hits().len()).map(move |s| (p, s))).collect()
+    }
+
     pub fn score_onsets(&self, onsets: &[Onset]) -> ScoreReport {
+        let table = self.slot_table();
+        let flat = |p: usize, s: usize| table.iter().position(|&e| e == (p, s)).unwrap_or(0);
         let grid: Vec<GridIn> =
-            self.plan.notes.iter().map(|n| GridIn { time: n.time + self.grid_offset_s, slot: n.slot }).collect();
-        let hits = self.pattern.hits();
-        let min_ioi = hits.iter().map(|n| n.len).fold(f64::INFINITY, f64::min) * sixteenth_seconds(self.plan.bpm);
-        score(&ScoreInput {
+            self.plan.notes.iter().map(|n| GridIn { time: n.time + self.grid_offset_s, slot: flat(n.pattern, n.slot) }).collect();
+        let min_len = self
+            .patterns_used()
+            .iter()
+            .flat_map(|&p| PATTERNS[p].hits())
+            .map(|n| n.len)
+            .fold(f64::INFINITY, f64::min);
+        let mut rep = score(&ScoreInput {
             grid: &grid,
             onsets,
             sixteenth: sixteenth_seconds(self.plan.bpm),
-            slots_per_bar: hits.len(),
-            min_ioi,
+            slots_per_bar: table.len(),
+            min_ioi: min_len * sixteenth_seconds(self.plan.bpm),
             calibrated: self.calibrated,
             audio: Some((&self.samples, f64::from(self.sample_rate))),
-        })
+        });
+        for st in &mut rep.slots {
+            if let Some(&(p, s)) = table.get(st.slot) {
+                st.pattern = PATTERNS[p].id.to_string();
+                st.slot_in_pattern = s;
+                st.pos16 = PATTERNS[p].hits()[s].pos;
+            }
+        }
+        rep
     }
 
     /// Bars per listen-back window: two bars, or one when bars are long.
@@ -74,7 +108,7 @@ impl RunData {
     /// The `n` worst non-overlapping windows by mean per-note error.
     pub fn worst_windows(&self, rep: &ScoreReport, onsets: &[Onset], n: usize) -> Vec<Window> {
         let wb = self.window_bars();
-        let nslots = self.pattern.hits().len();
+        let nslots = self.slot_table().len().max(1);
         // Mean level per slot, for tone error.
         let mut slot_lv = vec![(0.0, 0usize); nslots];
         for note in &rep.notes {
@@ -98,6 +132,11 @@ impl RunData {
         let mut cands = Vec::new();
         let mut start = 0;
         while start + wb <= self.plan.scored_bars {
+            let pat = self.plan.bar_patterns[start as usize];
+            if (start..start + wb).any(|b| self.plan.bar_patterns[b as usize] != pat) {
+                start += 1;
+                continue;
+            }
             let idx: Vec<usize> = (0..rep.notes.len())
                 .filter(|&i| self.plan.notes[i].bar >= start && self.plan.notes[i].bar < start + wb)
                 .collect();
@@ -110,7 +149,7 @@ impl RunData {
                     .filter(|o| o.time >= t0 - w && o.time < t1 - w && !matched.contains(&o.time.to_bits()) && o.level_db >= quiet)
                     .count();
                 let err = (idx.iter().map(|&i| note_err(i)).sum::<f64>() + 30.0 * extra as f64) / idx.len() as f64;
-                cands.push(Window { start_bar: start, bars: wb, error: err, notes: idx, n_extra: extra });
+                cands.push(Window { start_bar: start, bars: wb, error: err, notes: idx, n_extra: extra, pattern: pat, pattern_id: PATTERNS[pat].id });
             }
             start += 1;
         }
@@ -176,7 +215,7 @@ impl RunData {
         let dir = data_dir().join("runs");
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
-        let base = dir.join(format!("{stamp}_{}_{}bpm", self.pattern.id, self.plan.bpm));
+        let base = dir.join(format!("{stamp}_{}", self.level.key().replace('@', "_")));
         let wav = base.with_extension("wav");
         let spec = hound::WavSpec { channels: 1, sample_rate: self.sample_rate, bits_per_sample: 32, sample_format: hound::SampleFormat::Float };
         let mut w = hound::WavWriter::create(&wav, spec).map_err(|e| e.to_string())?;
@@ -185,9 +224,26 @@ impl RunData {
         }
         w.finalize().map_err(|e| e.to_string())?;
         #[derive(Serialize)]
+        struct PatternInfo {
+            id: &'static str,
+            name: &'static str,
+            notation: &'static str,
+        }
+        #[derive(Serialize)]
+        struct SlotInfo {
+            pattern: &'static str,
+            slot: usize,
+            pos16: f64,
+        }
+        #[derive(Serialize)]
         struct Out<'a> {
-            pattern: &'a str,
-            notation: &'a str,
+            level: String,
+            level_name: String,
+            /// Patterns used, and the pattern id of every scored bar.
+            patterns: Vec<PatternInfo>,
+            bar_patterns: Vec<&'static str>,
+            /// Flat slot ids used by `report.slots` and `report.notes[].slot`.
+            slots: Vec<SlotInfo>,
             bpm: u32,
             sample_rate: u32,
             count_in_bars: u32,
@@ -203,8 +259,19 @@ impl RunData {
             report: &'a ScoreReport,
         }
         let out = Out {
-            pattern: self.pattern.id,
-            notation: self.pattern.notation,
+            level: self.level.key(),
+            level_name: self.level.name(),
+            patterns: self
+                .patterns_used()
+                .into_iter()
+                .map(|p| PatternInfo { id: PATTERNS[p].id, name: PATTERNS[p].name, notation: PATTERNS[p].notation })
+                .collect(),
+            bar_patterns: self.plan.bar_patterns.iter().map(|&p| PATTERNS[p].id).collect(),
+            slots: self
+                .slot_table()
+                .into_iter()
+                .map(|(p, s)| SlotInfo { pattern: PATTERNS[p].id, slot: s, pos16: PATTERNS[p].hits()[s].pos })
+                .collect(),
             bpm: self.plan.bpm,
             sample_rate: self.sample_rate,
             count_in_bars: self.plan.count_in_bars,
@@ -229,12 +296,11 @@ impl RunData {
 mod tests {
     use super::*;
     use crate::detect::tests::{Rng, synth};
-    use crate::patterns::pattern_by_id;
 
     #[test]
     fn full_run_from_synth_signal() {
-        let pattern = pattern_by_id("pursuit").unwrap();
-        let plan = SessionPlan::new(pattern, 120, 2, 20.0);
+        let level = Level::drill(PATTERNS.iter().position(|p| p.id == "pursuit").unwrap(), 120);
+        let plan = SessionPlan::new(&level, 2, 20.0);
         let offset = 0.250; // recording started 250 ms before the first click (+ latency)
         let mut rng = Rng::new(1);
         // Bar 4 is sloppy: 40 ms random errors.
@@ -247,7 +313,7 @@ mod tests {
             })
             .collect();
         let samples = synth(48000.0, plan.total_seconds() + offset + 1.0, &hits, 2);
-        let run = RunData { pattern, plan, sample_rate: 48000, samples, grid_offset_s: offset, calibrated: false, timestamps_used: false, stream_latency_ms: 0.0, countin_latency_ms: None };
+        let run = RunData { level, plan, sample_rate: 48000, samples, grid_offset_s: offset, calibrated: false, timestamps_used: false, stream_latency_ms: 0.0, countin_latency_ms: None };
         let (rep, onsets) = run.analyse();
         assert!(rep.n_missed <= 4, "{}", rep.n_missed);
         for (n, g) in rep.notes.iter().zip(&run.plan.notes) {
@@ -259,7 +325,26 @@ mod tests {
         assert_eq!(run.window_bars(), 2);
         assert!(worst[0].start_bar == 3 || worst[0].start_bar == 4, "{worst:?}");
         let audio = run.render_listen(&worst[0], &ToneSettings { amp: crate::monitor::AmpChoice::Drive, cab: None, ..Default::default() }, 0.3, rep.latency_ms);
-        let expect = (4.0 + 0.5 + 0.25) * 48000.0; // 2 bars + 1 beat lead-in + half-beat tail
+        let expect = (4.0 + 0.5 + 0.25) * 48000.0;
+        assert_eq!(worst[0].pattern_id, "pursuit"); // 2 bars + 1 beat lead-in + half-beat tail
         assert!((audio.len() as f64 - expect).abs() < 2.0, "{}", audio.len());
+    }
+
+    #[test]
+    fn track_run_has_per_pattern_slots_and_clean_windows() {
+        let level = Level::track(2, 160);
+        let plan = SessionPlan::new(&level, 1, 40.0);
+        let mut rng = Rng::new(3);
+        let hits: Vec<(f64, f64)> = plan.notes.iter().map(|n| (n.time + 0.2 + 0.01 + 0.004 * rng.gauss(), -18.0)).collect();
+        let samples = synth(48000.0, plan.total_seconds() + 1.5, &hits, 7);
+        let run = RunData { level, plan, sample_rate: 48000, samples, grid_offset_s: 0.2, calibrated: false, timestamps_used: false, stream_latency_ms: 0.0, countin_latency_ms: None };
+        assert!(run.patterns_used().len() >= 2, "{:?}", run.plan.bar_patterns);
+        let (rep, onsets) = run.analyse();
+        assert_eq!(rep.slots.len(), run.slot_table().len());
+        assert!(rep.slots.iter().all(|s| !s.pattern.is_empty()));
+        assert!(rep.n_missed <= 2, "{}", rep.n_missed);
+        for w in run.worst_windows(&rep, &onsets, 3) {
+            assert!(w.notes.iter().all(|&i| run.plan.notes[i].pattern == w.pattern));
+        }
     }
 }

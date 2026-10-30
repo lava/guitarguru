@@ -11,8 +11,8 @@ use crate::countin::CountInGate;
 use crate::detect::Onset;
 use crate::monitor::Chain;
 use crate::paint::Paint;
-use crate::patterns::{BEATS_PER_BAR, Pattern, SessionPlan, beat_seconds, pattern_by_id};
-use crate::progress::{HistoryEntry, Progress, level_key};
+use crate::patterns::{BEATS_PER_BAR, Level, PATTERNS, SessionPlan, beat_seconds};
+use crate::progress::{HistoryEntry, Progress};
 use crate::score::ScoreReport;
 use crate::session::{RunData, Window};
 
@@ -28,7 +28,7 @@ pub enum Screen {
 }
 
 pub struct PlayState {
-    pub pattern: &'static Pattern,
+    pub level: Level,
     pub plan: SessionPlan,
     pub calibration: bool,
     pub click_start_frame: u64,
@@ -59,7 +59,7 @@ pub struct ResultsState {
     #[allow(dead_code)]
     pub onsets: Vec<Onset>,
     pub worst: Vec<Window>,
-    pub newly: Vec<String>,
+    pub newly: Vec<Level>,
     pub saved: Result<std::path::PathBuf, String>,
     pub prev_best: Option<HistoryEntry>,
     pub listening: Option<usize>,
@@ -89,7 +89,7 @@ pub struct Game {
     pub meter_db: f32,
     pub meter_peak_db: f32,
     pub meter_hold: f32,
-    pub selected: (usize, u32),
+    pub selected: Level,
     pub play: Option<PlayState>,
     pub results: Option<ResultsState>,
     pub lists: SettingsLists,
@@ -110,7 +110,7 @@ impl Game {
             meter_db: -90.0,
             meter_peak_db: -90.0,
             meter_hold: 0.0,
-            selected: (0, crate::patterns::BASE_BPM),
+            selected: Level::track(1, crate::patterns::BASE_BPM),
             play: None,
             results: None,
             lists: SettingsLists::default(),
@@ -191,14 +191,15 @@ impl Game {
         }
     }
 
-    pub fn start_level(&mut self, pattern: &'static Pattern, bpm: u32, calibration: bool) {
+    pub fn start_level(&mut self, level: Level, calibration: bool) {
+        let bpm = level.bpm;
         let Some(engine) = &self.engine else {
             self.message = Some("No audio engine - check Settings".into());
             return;
         };
         let seconds = if calibration { 8.0 * crate::patterns::bar_seconds(bpm) } else { SCORED_SECONDS };
         // Placeholder plan: the real count-in length is set when the count-in gate opens.
-        let plan = SessionPlan::new(pattern, bpm, 1, seconds);
+        let plan = SessionPlan::new(&level, 1, seconds);
         engine.start_recording();
         let sr = f64::from(SAMPLE_RATE);
         let start = engine.shared.out_frames.load(Ordering::Relaxed) + (0.4 * sr) as u64;
@@ -215,7 +216,7 @@ impl Game {
             gate: Some(CountInGate::new(beat_seconds(bpm), allowance)),
             countin_seed_ms: None,
             last_gate_check: 0.0,
-            pattern,
+            level,
             plan,
             calibration,
             click_start_frame: start,
@@ -268,7 +269,7 @@ impl Game {
                 let bar = crate::patterns::bar_seconds(bpm);
                 let bars = ((now + 0.05) / bar).ceil().max(1.0) as u32;
                 let seconds = if play.calibration { 8.0 * bar } else { SCORED_SECONDS };
-                play.plan = SessionPlan::new(play.pattern, bpm, bars, seconds);
+                play.plan = SessionPlan::new(&play.level, bars, seconds);
                 play.gate = None;
                 play.countin_seed_ms = Some(seed * 1e3);
                 engine.set_click(Some(ClickPlan {
@@ -301,8 +302,7 @@ impl Game {
             return;
         }
         // Keep only fully played bars.
-        play.plan.notes.retain(|n| n.bar < done_bars);
-        play.plan.scored_bars = done_bars;
+        play.plan.truncate(done_bars);
         play.ended_early = Some(now);
         engine.set_click(None);
         self.finish_play();
@@ -316,7 +316,7 @@ impl Game {
         let base = self.base_offset(&play, rec_start);
         let calib = if play.calibration { None } else { self.cfg.latency_ms };
         let run = RunData {
-            pattern: play.pattern,
+            level: play.level,
             plan: play.plan,
             sample_rate: SAMPLE_RATE,
             samples,
@@ -341,7 +341,7 @@ impl Game {
         if let Err(e) = &saved {
             eprintln!("saving run failed: {e}");
         }
-        let key = level_key(run.pattern.id, run.plan.bpm);
+        let key = run.level.key();
         let prev_best = self.progress.best_entry(&key).cloned();
         let mut newly = Vec::new();
         if play.calibration {
@@ -350,8 +350,7 @@ impl Game {
                 self.cfg.save();
             }
         } else {
-            newly = self.progress.record(run.pattern, run.plan.bpm, rep.combined_pct);
-            self.progress.fresh.remove(&key);
+            newly = self.progress.record(&run.level, rep.combined_pct);
             self.progress.history.push(HistoryEntry {
                 key,
                 date: chrono::Local::now().format("%Y-%m-%d %H:%M").to_string(),
@@ -401,15 +400,15 @@ impl Game {
 
     pub fn retry(&mut self) {
         if let Some(r) = &self.results {
-            let (p, b, c) = (r.run.pattern, r.run.plan.bpm, r.calibration);
+            let (l, c) = (r.run.level, r.calibration);
             self.stop_listen();
-            self.start_level(p, b, c);
+            self.start_level(l, c);
         }
     }
 }
 
-pub fn calibration_pattern() -> &'static Pattern {
-    pattern_by_id("quarters").expect("quarters pattern")
+pub fn calibration_level() -> Level {
+    Level::drill(PATTERNS.iter().position(|p| p.id == "quarters").expect("quarters pattern"), CALIBRATION_BPM)
 }
 
 pub fn game_system(mut game: ResMut<Game>, mut paint: ResMut<Paint>, time: Res<Time>, keys: Res<ButtonInput<KeyCode>>, mut exit: MessageWriter<AppExit>) {

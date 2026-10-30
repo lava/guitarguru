@@ -3,7 +3,7 @@
 use bevy::color::Color;
 
 use crate::paint::{Align, Paint, col};
-use crate::patterns::{BarNote, Pattern};
+use crate::patterns::Pattern;
 
 /// 16-cell glyph of a pattern bar: onsets bright, sustain dim, rests empty.
 pub fn pattern_glyph(p: &mut Paint, x: f32, y: f32, w: f32, h: f32, pattern: &Pattern, on: Color) {
@@ -87,9 +87,4 @@ pub fn stepper(p: &mut Paint, x: f32, y: f32, label: &str, value: &str) -> i32 {
         d = 1;
     }
     d
-}
-
-pub fn bar_label(n: &BarNote) -> &'static str {
-    let k = n.pos.round() as usize % 4;
-    ["1", "e", "+", "a"][k]
 }

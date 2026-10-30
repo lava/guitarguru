@@ -2,7 +2,7 @@
 
 use std::sync::atomic::Ordering;
 
-use crate::game::{CALIBRATION_BPM, Game, Screen, calibration_pattern};
+use crate::game::{Game, Screen, calibration_level};
 use crate::monitor::AmpChoice;
 use crate::paint::{Align, Paint, col};
 use crate::ui_common::*;
@@ -210,7 +210,7 @@ pub fn draw(g: &mut Game, p: &mut Paint) {
     p.text(x + 16.0, y + 78.0, "Stream timestamps already cover the buffers; this", 13.0, col::DIM, Align::Left);
     p.text(x + 16.0, y + 96.0, "adds converter latency + your feel. Enables rush/drag.", 13.0, col::DIM, Align::Left);
     if p.button(x + 16.0, y + 116.0, 200.0, 40.0, "Calibrate now", true) {
-        g.start_level(calibration_pattern(), CALIBRATION_BPM, true);
+        g.start_level(calibration_level(), true);
         return;
     }
     if g.cfg.latency_ms.is_some() && p.button(x + 230.0, y + 116.0, 120.0, 40.0, "Reset", false) {

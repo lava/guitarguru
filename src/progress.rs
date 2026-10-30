@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::patterns::{BASE_BPM, BPM_MAX, BPM_MIN, BPM_STEP, PATTERNS, Pattern};
+use crate::patterns::{BASE_BPM, BPM_MAX, BPM_MIN, BPM_STEP, Level, LevelKind, PATTERNS};
 
 /// Combined score (percent) needed to pass a level.
 pub const PASS_THRESHOLD: f64 = 80.0;
@@ -19,9 +19,6 @@ pub fn data_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".guitarguru"))
 }
 
-pub fn level_key(pattern_id: &str, bpm: u32) -> String {
-    format!("{pattern_id}@{bpm}")
-}
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Progress {
@@ -61,9 +58,7 @@ impl Progress {
 impl Progress {
     pub fn fresh() -> Self {
         let mut p = Self::default();
-        for pat in PATTERNS.iter().filter(|p| p.tier == 1) {
-            p.unlocked.insert(level_key(pat.id, BASE_BPM));
-        }
+        p.unlocked.insert(Level::track(1, BASE_BPM).key());
         p
     }
 
@@ -76,11 +71,20 @@ impl Progress {
             .ok()
             .and_then(|s| serde_json::from_str::<Progress>(&s).ok())
             .unwrap_or_else(Self::fresh);
-        // New tier-1 patterns added later are always available.
-        for pat in PATTERNS.iter().filter(|p| p.tier == 1) {
-            p.unlocked.insert(level_key(pat.id, BASE_BPM));
-        }
+        p.migrate();
         p
+    }
+
+    /// Earlier versions unlocked single-pattern levels (`pattern@bpm`); those are drills
+    /// now, and an unlocked one opens its tier's track at that tempo.
+    fn migrate(&mut self) {
+        let old: Vec<Level> = self.unlocked.iter().filter_map(|k| Level::from_key(k)).filter(|l| !l.is_track()).collect();
+        for l in old {
+            self.unlocked.remove(&l.key());
+            self.unlocked.insert(Level::track(l.tier(), l.bpm).key());
+        }
+        self.fresh.retain(|k| k.starts_with("tier"));
+        self.unlocked.insert(Level::track(1, BASE_BPM).key());
     }
 
     pub fn save(&self) {
@@ -95,34 +99,44 @@ impl Progress {
         }
     }
 
-    pub fn is_unlocked(&self, pattern_id: &str, bpm: u32) -> bool {
-        self.unlocked.contains(&level_key(pattern_id, bpm))
+    /// Tracks are unlocked explicitly; a drill is open wherever its tier's track is.
+    pub fn is_unlocked(&self, level: &Level) -> bool {
+        self.unlocked.contains(&Level::track(level.tier(), level.bpm).key())
     }
 
-    pub fn best(&self, pattern_id: &str, bpm: u32) -> Option<f64> {
-        self.best.get(&level_key(pattern_id, bpm)).copied()
+    pub fn best(&self, level: &Level) -> Option<f64> {
+        self.best.get(&level.key()).copied()
     }
 
-    /// Record a result. Returns the levels newly unlocked by it.
-    pub fn record(&mut self, pattern: &Pattern, bpm: u32, combined: f64) -> Vec<String> {
-        let key = level_key(pattern.id, bpm);
-        let best = self.best.entry(key).or_insert(combined);
+    pub fn passed(&self, level: &Level) -> bool {
+        self.best(level).is_some_and(|b| b >= PASS_THRESHOLD)
+    }
+
+    /// Record a result. Returns the levels newly unlocked by it. Only tracks unlock:
+    /// the next tier's track at the same tempo and the same track at +/-20 BPM.
+    pub fn record(&mut self, level: &Level, combined: f64) -> Vec<Level> {
+        let best = self.best.entry(level.key()).or_insert(combined);
         if combined > *best {
             *best = combined;
         }
+        self.fresh.remove(&level.key());
         let mut newly = Vec::new();
+        let LevelKind::Track(tier) = level.kind else { return newly };
         if combined >= PASS_THRESHOLD {
-            let mut targets: Vec<String> =
-                PATTERNS.iter().filter(|p| p.tier == pattern.tier + 1).map(|p| level_key(p.id, bpm)).collect();
+            let bpm = level.bpm;
+            let mut targets = Vec::new();
+            if tier < max_tier() {
+                targets.push(Level::track(tier + 1, bpm));
+            }
             if bpm + BPM_STEP <= BPM_MAX {
-                targets.push(level_key(pattern.id, bpm + BPM_STEP));
+                targets.push(Level::track(tier, bpm + BPM_STEP));
             }
             if bpm >= BPM_MIN + BPM_STEP {
-                targets.push(level_key(pattern.id, bpm - BPM_STEP));
+                targets.push(Level::track(tier, bpm - BPM_STEP));
             }
             for t in targets {
-                if self.unlocked.insert(t.clone()) {
-                    self.fresh.insert(t.clone());
+                if self.unlocked.insert(t.key()) {
+                    self.fresh.insert(t.key());
                     newly.push(t);
                 }
             }
@@ -131,26 +145,41 @@ impl Progress {
     }
 }
 
+pub fn max_tier() -> u32 {
+    PATTERNS.iter().map(|p| p.tier).max().unwrap_or(1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::patterns::pattern_by_id;
 
     #[test]
     fn unlock_rules() {
         let mut p = Progress::fresh();
-        assert!(p.is_unlocked("quarters", 80));
-        assert!(p.is_unlocked("eighths", 80));
-        assert!(!p.is_unlocked("gallop", 80));
-        let q = pattern_by_id("quarters").unwrap();
-        assert!(p.record(q, 80, 50.0).is_empty());
-        let newly = p.record(q, 80, 85.0);
-        assert!(p.is_unlocked("gallop", 80) && p.is_unlocked("tremolo", 80));
-        assert!(p.is_unlocked("quarters", 100) && p.is_unlocked("quarters", 60));
-        assert!(!p.is_unlocked("gallop", 100));
-        assert_eq!(newly.len(), 4);
-        assert_eq!(p.best("quarters", 80), Some(85.0));
-        let newly = p.record(q, 180, 90.0);
-        assert_eq!(newly, vec!["tremolo@180", "gallop@180", "quarters@160"]);
+        assert!(p.is_unlocked(&Level::track(1, 80)));
+        assert!(p.is_unlocked(&Level::drill(0, 80)) && p.is_unlocked(&Level::drill(1, 80)));
+        assert!(!p.is_unlocked(&Level::track(2, 80)) && !p.is_unlocked(&Level::drill(3, 80)));
+        // Drills keep their own best but unlock nothing.
+        assert!(p.record(&Level::drill(0, 80), 95.0).is_empty());
+        assert_eq!(p.best(&Level::drill(0, 80)), Some(95.0));
+        assert!(p.record(&Level::track(1, 80), 50.0).is_empty());
+        let newly = p.record(&Level::track(1, 80), 85.0);
+        assert_eq!(newly, vec![Level::track(2, 80), Level::track(1, 100), Level::track(1, 60)]);
+        assert!(p.is_unlocked(&Level::drill(3, 80)), "tier-2 drills open with the tier-2 track");
+        assert!(!p.is_unlocked(&Level::track(2, 100)));
+        assert_eq!(p.best(&Level::track(1, 80)), Some(85.0));
+        let newly = p.record(&Level::track(1, 180), 90.0);
+        assert_eq!(newly, vec![Level::track(2, 180), Level::track(1, 160)]);
+    }
+
+    #[test]
+    fn migrates_old_pattern_levels() {
+        let mut p = Progress::default();
+        p.unlocked.insert("gallop@120".into());
+        p.best.insert("gallop@120".into(), 77.0);
+        p.migrate();
+        assert!(p.is_unlocked(&Level::track(2, 120)));
+        assert!(p.is_unlocked(&Level::track(1, 80)));
+        assert_eq!(p.best(&Level::drill(3, 120)), Some(77.0));
     }
 }
