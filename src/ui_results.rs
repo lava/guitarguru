@@ -95,7 +95,7 @@ pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
     let stage = mascot::stage_for(lvl.bpm, lvl.mask().count_ones());
     let better = r.prev_best.as_ref().is_none_or(|b| rep.combined_pct > b.combined);
     let mood = if pass { Mood::Happy } else { Mood::Sad };
-    mascot::draw(p, imgs, 760.0, 120.0, 0.62, stage, mood, &mascot::pose(stage, None, false));
+    mascot::draw(p, imgs, 760.0, 120.0, 0.62, stage, mood, &mascot::pose(stage, None));
     let quote = verdict(r, pass, better);
     let lines = wrap(&quote, 40);
     for (i, l) in lines.iter().enumerate() {

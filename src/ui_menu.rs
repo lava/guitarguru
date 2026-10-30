@@ -82,13 +82,12 @@ pub fn draw(g: &mut Game, p: &mut Paint, keys: &ButtonInput<KeyCode>, imgs: &Mas
         return;
     }
 
-    // ---------- the guru (left), nodding along at the selected tempo
+    // ---------- the guru (left), a metronome at the selected tempo
     let mix = g.mix;
     let sel_bpm = g.selected.bpm;
     let stage = mascot::stage_for(sel_bpm, mix.count_ones());
     let beats = g.clock * f64::from(sel_bpm) / 60.0;
-    let accent = (beats.round() as i64).rem_euclid(4) == 0;
-    let pose = mascot::pose(stage, Some(beats - beats.floor()), accent);
+    let pose = mascot::pose(stage, Some(beats));
     mascot::draw(p, imgs, 220.0, 196.0, 1.15, stage, Mood::Neutral, &pose);
 
     // ---------- ingredients

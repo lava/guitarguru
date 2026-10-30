@@ -1,6 +1,9 @@
 //! The guru mascot: rasterised PNG layers (see `examples/rasterize_mascot.rs`) animated as
-//! sprites. It keeps time by a head bob phase-locked to the click (driven by the audio
-//! clock), deeper on beat one; five stages from serene to full metal.
+//! sprites. It is a metronome: the raised horns hand swings like a pendulum, one full
+//! cycle per two beats, passing the middle of its travel (its fastest point) on every
+//! click with the turning points on the off-beat eighths; the head moves with it, wider
+//! on beat one. Phase comes from the caller's clock (the audio clock while playing). Five
+//! stages from serene to full metal.
 
 use std::collections::HashMap;
 
@@ -10,7 +13,9 @@ use crate::paint::Paint;
 use crate::patterns::{BPM_MIN, BPM_STEP};
 
 pub const STAGE_NAMES: [&str; 6] = ["", "Serene", "Plugged in", "Horns up", "Storm", "Full metal"];
-const LAYERS: [&str; 7] = ["back", "hairback", "fly", "torso", "head", "front", "over"];
+const LAYERS: [&str; 8] = ["back", "hairback", "fly", "torso", "head", "front", "arm", "over"];
+/// Shoulder the raised arm swings about (viewBox units).
+const ARM_PIVOT: Vec2 = Vec2::new(166.0, 136.0);
 /// Source viewBox of the layers.
 const VW: f32 = 240.0;
 const VH: f32 = 280.0;
@@ -58,29 +63,44 @@ pub fn load(mut commands: Commands, assets: Res<AssetServer>) {
     commands.insert_resource(MascotImages { layers });
 }
 
-/// Head motion at click phase `phase` (0 = the click; None = still).
+/// Head and arm motion.
 pub struct Pose {
     dy: f32,
     sy: f32,
     rot_deg: f32,
     lift: f32,
+    /// Arm rotation about the shoulder, degrees (positive = clockwise on screen, down).
+    arm_deg: f32,
 }
 
-pub fn pose(stage: u32, phase: Option<f64>, accent: bool) -> Pose {
+/// Pendulum position at `beats` (beat count from the clock, beat one of a bar at multiples
+/// of 4): sin(pi * beats), 0 on every click, +/-1 on the off-beat eighths; one full cycle
+/// per two beats. Positive = head down / arm lowered.
+pub fn swing(beats: f64) -> f64 {
+    (std::f64::consts::PI * beats).sin()
+}
+
+/// Pose at `beats` (None = still, arm and head in the middle).
+pub fn pose(stage: u32, beats: Option<f64>) -> Pose {
     const AMP: [f32; 6] = [0.0, 1.5, 2.5, 4.0, 6.0, 9.0];
     const SQ: [f32; 6] = [0.0, 0.02, 0.03, 0.05, 0.07, 0.10];
+    const ARM: [f32; 6] = [0.0, 12.0, 14.0, 16.0, 19.0, 23.0];
     let s = stage.clamp(1, 5) as usize;
-    let mut c = phase.map_or(0.0, |ph| (0.5 + 0.5 * (std::f64::consts::TAU * ph).cos()) as f32);
-    if phase.is_some() && s >= 4 {
-        c = c.powf(2.2);
+    let u = beats.map_or(0.0, swing) as f32;
+    // Beat-one emphasis: a smooth bump (x1.35 at its peak) over the beat either side of
+    // each bar's first click, so the amplitude never jumps.
+    let k = beats.map_or(1.0, |b| {
+        let d = (b - 4.0 * (b / 4.0).round()).abs();
+        if d < 1.0 { 1.0 + 0.35 * (0.5 + 0.5 * (std::f64::consts::PI * d).cos()) as f32 } else { 1.0 }
+    });
+    let down = u.max(0.0);
+    Pose {
+        dy: AMP[s] * u * k,
+        sy: 1.0 - SQ[s] * down * k,
+        rot_deg: if s == 5 { -12.0 - 6.0 * u * k } else { 0.0 },
+        lift: 0.5 - 0.5 * u,
+        arm_deg: ARM[s] * u * k,
     }
-    let k = if accent { 1.35 } else { 1.0 };
-    let rot_deg = if s == 5 {
-        if phase.is_some() { -6.0 - 6.0 * c } else { -14.0 }
-    } else {
-        0.0
-    };
-    Pose { dy: AMP[s] * c * k, sy: 1.0 - SQ[s] * c * k, rot_deg, lift: if phase.is_some() { 1.0 - c } else { 1.0 } }
 }
 
 /// Draw the guru with its top-left at (x, y), `scale` design px per viewBox unit.
@@ -92,10 +112,9 @@ pub fn draw(p: &mut Paint, imgs: &MascotImages, x: f32, y: f32, scale: f32, stag
     let body_dy = ps.dy * 0.2;
     // A layer scaled in y by `sy` about viewBox y `py`, then rotated by `rot` about the head
     // pivot (120,128) and moved down by `dy` (all in viewBox units, y down).
-    let layer = |p: &mut Paint, l: &'static str, sy: f32, py: f32, rot_deg: f32, dy: f32| {
+    let layer_about = |p: &mut Paint, l: &'static str, sy: f32, py: f32, rot_deg: f32, dy: f32, piv: Vec2| {
         let Some(h) = get(l) else { return };
-        let a = Vec2::new(120.0, py);
-        let piv = Vec2::new(120.0, 128.0);
+        let a = Vec2::new(piv.x, py);
         let th = rot_deg.to_radians();
         let v = a - piv;
         // y-down rotation: positive angle turns clockwise on screen.
@@ -103,6 +122,9 @@ pub fn draw(p: &mut Paint, imgs: &MascotImages, x: f32, y: f32, scale: f32, stag
         let pos = piv + rv + Vec2::new(0.0, dy);
         let anchor = Vec2::new(a.x / VW - 0.5, 0.5 - a.y / VH);
         p.image(h, to(pos.x, pos.y), Vec2::new(size.x, size.y * sy), anchor, -th, Color::WHITE);
+    };
+    let layer = |p: &mut Paint, l: &'static str, sy: f32, py: f32, rot_deg: f32, dy: f32| {
+        layer_about(p, l, sy, py, rot_deg, dy, Vec2::new(120.0, 128.0));
     };
     let head_dy = ps.dy + body_dy;
     layer(p, "back", 1.0, 128.0, 0.0, 0.0);
@@ -117,6 +139,7 @@ pub fn draw(p: &mut Paint, imgs: &MascotImages, x: f32, y: f32, scale: f32, stag
     layer(p, "torso", 1.0, 128.0, 0.0, body_dy);
     layer(p, "head", ps.sy, 128.0, ps.rot_deg, head_dy);
     layer(p, "front", 1.0, 128.0, 0.0, body_dy);
+    layer_about(p, "arm", 1.0, ARM_PIVOT.y, ps.arm_deg, body_dy, ARM_PIVOT);
     layer(p, "over", 1.0, 128.0, 0.0, 0.0);
 }
 
@@ -132,11 +155,29 @@ mod tests {
         assert_eq!(stage_for(120, 2), 3); // 4 + 4 = 8
         assert_eq!(stage_for(160, 2), 4); // 6 + 4 = 10
         assert_eq!(stage_for(180, 4), 5);
-        let still = pose(5, None, false);
-        assert_eq!(still.rot_deg, -14.0);
-        let on_click = pose(3, Some(0.0), true);
-        assert!((on_click.dy - 4.0 * 1.35).abs() < 1e-5);
-        let off = pose(3, Some(0.5), false);
-        assert!(off.dy.abs() < 1e-5);
+        let still = pose(5, None);
+        assert_eq!(still.rot_deg, -12.0);
+        assert_eq!(still.arm_deg, 0.0);
+    }
+
+    /// The arm passes the middle of its travel on every click (at full speed, alternating
+    /// direction) and turns on the off-beat eighths.
+    #[test]
+    fn arm_is_a_metronome() {
+        for beat in 0..8 {
+            let b = f64::from(beat);
+            let on = pose(3, Some(b));
+            assert!(on.arm_deg.abs() < 1e-3 && on.dy.abs() < 1e-3, "beat {beat}: {}", on.arm_deg);
+            let (before, after) = (pose(3, Some(b - 0.02)).arm_deg, pose(3, Some(b + 0.02)).arm_deg);
+            assert!(before.signum() == -after.signum() && after.abs() > 0.5, "moving through the middle");
+            let dir = if beat % 2 == 0 { 1.0 } else { -1.0 };
+            assert!(after * dir > 0.0, "direction alternates per beat");
+            let ext = pose(3, Some(b + 0.5)).arm_deg;
+            assert!((ext.abs() - 16.0).abs() < 16.0 * 0.36, "extreme on the off-beat: {ext}");
+            assert!((pose(3, Some(b + 0.49)).arm_deg.abs() - ext.abs()).abs() < 0.1);
+        }
+        // Head moves with the arm.
+        let p = pose(4, Some(0.3));
+        assert!(p.dy > 0.0 && p.arm_deg > 0.0);
     }
 }

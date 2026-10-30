@@ -63,8 +63,7 @@ pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
         let beats = t / beat_s;
         let running = t >= 0.0 && (waiting || t < total);
         let stage = mascot::stage_for(bpm, mask.count_ones());
-        let near = beats.round() as i64;
-        let pose = mascot::pose(stage, running.then(|| beats - beats.floor()), near.rem_euclid(BEATS_PER_BAR as i64) == 0);
+        let pose = mascot::pose(stage, running.then_some(beats));
         mascot::draw(p, imgs, 266.0, 168.0, 0.95, stage, Mood::Neutral, &pose);
         p.label_at(946.0, 285.0, &format!("stage {stage} \u{b7} {}", STAGE_NAMES[stage as usize]), Align::Left, col::DIM);
 
@@ -72,7 +71,7 @@ pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
         let (dx, dy, dr) = (720.0, 293.0, 163.0);
         let cur_beat = beats.floor() as i64;
         let since = ((beats - beats.floor()) * beat_s) as f32;
-        let flash = if running { (-since / 0.14).exp() } else { 0.0 };
+        let flash = if running { flash_level(f64::from(since), beat_s) } else { 0.0 };
         let accent = cur_beat.rem_euclid(BEATS_PER_BAR as i64) == 0;
         let hue = if accent { col::LATE } else { col::EARLY };
         p.ring(dx, dy, dr + 22.0, col::LINE);
@@ -249,5 +248,38 @@ fn count_label(k: i32) -> String {
         1 => "e".into(),
         2 => "+".into(),
         _ => "a".into(),
+    }
+}
+
+/// Click-dot flash, `since` seconds after a click: full colour for up to 50 ms, then a
+/// smooth fade that is over 120 ms later or at 35 % of the beat, whichever comes first.
+/// Each flash ends well before the next click, so colours never blend between clicks.
+fn flash_level(since: f64, beat_s: f64) -> f32 {
+    let end = (0.05 + 0.12f64).min(0.35 * beat_s);
+    let hold = 0.05f64.min(0.4 * end);
+    if since < 0.0 || since >= end {
+        0.0
+    } else if since < hold {
+        1.0
+    } else {
+        let x = (since - hold) / (end - hold);
+        (1.0 - x * x * (3.0 - 2.0 * x)) as f32
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flash_is_short_and_never_overlaps() {
+        for bpm in [40.0, 80.0, 120.0, 180.0, 240.0] {
+            let beat = 60.0 / bpm;
+            assert_eq!(flash_level(0.0, beat), 1.0);
+            assert_eq!(flash_level(0.35 * beat, beat), 0.0, "{bpm} BPM: over by 35 % of the beat");
+            assert_eq!(flash_level(0.171, beat), 0.0, "{bpm} BPM: over within 170 ms");
+        }
+        assert_eq!(flash_level(0.045, 0.75), 1.0);
+        assert!(flash_level(0.1, 0.75) > 0.1 && flash_level(0.1, 0.75) < 0.9);
     }
 }

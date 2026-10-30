@@ -6,9 +6,11 @@
 //!
 //! Writes `assets/mascot/s{stage}_{mood}_{layer}.png` (viewBox 240x280 at 2x).
 //! Layers, back to front: back (fire, cloud, lightning), hairback, fly (flying hair),
-//! torso, head, front (guitar, horns hand), over (notes, petals, lotus).
+//! torso, head, front (guitar), arm (raised horns hand, every stage but sad), over (notes,
+//! petals, lotus).
 //! Runtime transforms (see `src/mascot.rs`): hairback/fly/head follow the head bob
-//! (pivot 120,128), torso/front follow the body at 20 %, fly is also stretched about (120,70).
+//! (pivot 120,128), torso/front follow the body at 20 %, fly is also stretched about
+//! (120,70), arm swings about the shoulder (`ARM_PIVOT`, 166,136) like a metronome.
 
 use std::path::Path;
 
@@ -161,18 +163,32 @@ fn layer(stage: u32, mood: Mood, name: &str) -> String {
 <circle cx="64" cy="133" r="7" fill="#e9c39b"/><circle cx="148" cy="190" r="7" fill="#e9c39b"/>"##
                 }
             }
-            if s >= 3 && !sad {
+        }
+        "arm" => {
+            if !sad {
+                // Sleeve from the shoulder (166,136); on stages 1-2 it starts inside the
+                // round robe. Wrist: red sweatband (stage 2, like the headband), studded
+                // black band (stages 4-5).
+                let from = if s <= 2 { "M160 142" } else { "M166 136" };
                 b += &format!(
-                    r##"<path d="M166 136 L 182 94" stroke-width="8" stroke="{robe}"/>
+                    r##"<path d="{from} L 182 94" stroke-width="8" stroke="{robe}"/>
 <circle cx="184" cy="88" r="8.5" fill="#e9c39b"/>
 <path d="M179 82 L 175 64 M190 82 L 195 64" stroke-width="5" stroke="#e9c39b"/>
 <path d="M176.5 81 L 173 64 M192.5 81 L 197 64" fill="none" stroke-width="1"/>"##
                 );
+                if s == 2 {
+                    b += r##"<path d="M171.5 104.7 L 182.7 108.9 L 184.5 104.3 L 173.3 100.1 Z" fill="#b5452f" stroke-width="1.2"/>"##;
+                }
+                if s >= 4 {
+                    b += r##"<path d="M171.5 104.7 L 182.7 108.9 L 184.5 104.3 L 173.3 100.1 Z" fill="#1d1612" stroke-width="1.2"/>
+<circle cx="174.6" cy="103.4" r="1.3" fill="#cfc6b8" stroke="none"/><circle cx="178" cy="104.6" r="1.3" fill="#cfc6b8" stroke="none"/><circle cx="181.4" cy="105.9" r="1.3" fill="#cfc6b8" stroke="none"/>"##;
+                }
             }
         }
         "over" => {
             if s <= 2 && !sad {
-                b += r##"<path d="M196 72 v-16 l9 -2.5 v16 M196 72 a3.5 2.6 0 1 1 -1 -1 M205 69.5 a3.5 2.6 0 1 1 -1 -1" fill="#1f7a6e" stroke="#1f7a6e" stroke-width="1.3"/>"##;
+                // Floating note on the left: the raised hand is on the right.
+                b += r##"<path transform="translate(-160 0)" d="M196 72 v-16 l9 -2.5 v16 M196 72 a3.5 2.6 0 1 1 -1 -1 M205 69.5 a3.5 2.6 0 1 1 -1 -1" fill="#1f7a6e" stroke="#1f7a6e" stroke-width="1.3"/>"##;
             }
             if happy {
                 b += r##"<g stroke-width="1"><path d="M34 44 c4 -6 10 -4 8 2 c-2 5 -8 4 -8 -2 Z" fill="#dca451"/>
@@ -202,7 +218,7 @@ fn main() {
     let mut n = 0;
     for stage in 1..=5 {
         for (mood, mname) in [(Mood::Neutral, "neutral"), (Mood::Happy, "happy"), (Mood::Sad, "sad")] {
-            for name in ["back", "hairback", "fly", "torso", "head", "front", "over"] {
+            for name in ["back", "hairback", "fly", "torso", "head", "front", "arm", "over"] {
                 let svg = layer(stage, mood, name);
                 let tree = resvg::usvg::Tree::from_str(&svg, &opt).unwrap_or_else(|e| panic!("{stage} {mname} {name}: {e}"));
                 let mut pix = resvg::tiny_skia::Pixmap::new((W as f32 * SCALE) as u32, (H as f32 * SCALE) as u32).unwrap();
