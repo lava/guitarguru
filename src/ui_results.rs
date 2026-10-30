@@ -1,8 +1,9 @@
 //! Results ("Guitar Guru" style, scrollable): a 32-petal mandala whose petals fill to the
-//! score, the guru (happy or sad) with a short verdict, fact columns, "Listen again" for
-//! the three weakest moments, the timing section (evenness headline, global offset as
-//! information, drift against it over the whole run, per-pattern slots) and the tone
-//! section (palm-muted and open notes apart).
+//! score, the guru (happy or sad) with a short verdict, fact columns, the whole run (drift
+//! against the global offset, weak-spot pins, section letters), "Listen again" for the
+//! three weakest windows, the timing section (evenness headline, global offset, interval
+//! errors, deviations, per-pattern slots) and the tone section (palm-muted and open notes
+//! apart).
 
 use bevy::color::Color;
 
@@ -15,7 +16,7 @@ use crate::score::ScoreReport;
 use crate::session::Window;
 use crate::ui_menu::link;
 
-const CONTENT_H: f32 = 2150.0;
+const CONTENT_H: f32 = 2510.0;
 
 enum Action {
     None,
@@ -139,15 +140,17 @@ pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
     match &r.saved {
         Ok(path) => {
             let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-            p.text(752.0, 520.0, format!("take saved \u{b7} {}", fit(&name, 420.0, 11.0)), 11.0, col::FAINT, Align::Left);
+            p.text(752.0, 520.0, format!("saved \u{b7} {}", fit(&name, 440.0, 11.0)), 11.0, col::FAINT, Align::Left);
         }
         Err(e) => p.text(752.0, 520.0, format!("save failed: {e}"), 11.0, col::LATE, Align::Left),
     }
 
+    // ---------- the whole run
+    run_timeline(p, r, 113.0, 580.0);
+
     // ---------- listen again
-    let ly = 600.0;
+    let ly = 830.0;
     p.italic(113.0, ly, "Listen again", 34.0, col::TEXT, Align::Left);
-    p.label(280.0, ly + 6.0, "the three weakest moments \u{b7} raw guitar with the click");
     p.hline(113.0, ly + 24.0, 1130.0, col::LINE);
     for (i, w) in r.worst.iter().enumerate() {
         let x = 113.0 + i as f32 * 390.0;
@@ -160,13 +163,13 @@ pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
         }
     }
     if r.worst.is_empty() {
-        p.text(113.0, ly + 60.0, "not enough bars for a breakdown", 14.0, col::FAINT, Align::Left);
+        p.text(113.0, ly + 60.0, "\u{2013}", 14.0, col::FAINT, Align::Left);
     }
 
     // ---------- timing
-    timing_section(p, r, 113.0, 860.0);
+    let bottom = timing_section(p, r, 113.0, 1100.0);
     // ---------- tone
-    tone_section(p, r, 113.0, 1700.0);
+    tone_section(p, r, 113.0, bottom + 60.0);
 
     match action {
         Action::None => {}
@@ -258,18 +261,18 @@ fn verdict(r: &ResultsState, pass: bool, better: bool) -> String {
     };
     let slot = rep.slots.iter().filter(|s| s.consistent).max_by(|a, b| a.mean_ms.abs().total_cmp(&b.mean_ms.abs()));
     let body = if rep.n_missed * 5 > rep.n_grid {
-        "Many notes went missing; play every stroke, even quietly.".to_string()
+        format!("{} of {} notes missed.", rep.n_missed, rep.n_grid)
     } else if rep.drift_rms_ms > 40.0 {
-        "You drift away from the click over the run; listen for beat one.".to_string()
+        format!("Drift {:.0} ms.", rep.drift_rms_ms)
     } else if let Some(s) = slot {
         let name = r.run.plan.patterns.iter().find(|p| p.id == s.pattern).map_or("the pattern", |p| &*p.name);
         format!("In {name}, {} comes {} ({:+.0} ms).", count_name(s.pos16), if s.mean_ms < 0.0 { "early" } else { "late" }, s.mean_ms)
     } else if rep.spread_ms > 25.0 {
-        "The notes come unevenly; slow down a step and lock in.".to_string()
+        format!("Evenness {:.0} ms.", rep.spread_ms)
     } else if rep.level_pct < 50.0 {
-        "Timing holds; now even out how hard you hit.".to_string()
+        format!("Attacks vary by {:.1} dB.", rep.level_std_detrended_db)
     } else {
-        "Steady hands. Try the next tempo.".to_string()
+        format!("Evenness {:.0} ms.", rep.spread_ms)
     };
     format!("\u{201c}{head} {body}\u{201d}")
 }
@@ -390,9 +393,10 @@ fn section_header(p: &mut Paint, x: f32, y: f32, title: &str, label: &str) {
     p.hline(x, y + 24.0, 1130.0, col::LINE);
 }
 
-fn timing_section(p: &mut Paint, r: &ResultsState, x: f32, y: f32) {
+/// Returns the bottom y.
+fn timing_section(p: &mut Paint, r: &ResultsState, x: f32, y: f32) -> f32 {
     let rep = &r.rep;
-    section_header(p, x, y, "Timing", "evenness of consecutive notes \u{b7} lag doesn't count");
+    section_header(p, x, y, "Timing", "");
     // legend
     for (i, (c, t)) in [(col::EARLY, "early"), (col::ONTIME, "within 10 ms"), (col::LATE, "late")].iter().enumerate() {
         let lx = 1000.0 + [0.0, 64.0, 168.0][i];
@@ -404,8 +408,8 @@ fn timing_section(p: &mut Paint, r: &ResultsState, x: f32, y: f32) {
     let prev = r.prev_best.as_ref();
     let cols: [(&str, String, &str, String, Color); 3] = [
         ("evenness", format!("{:.0}", rep.spread_ms), "ms", prev.map_or(format!("IOI sd {:.0} ms", rep.ioi_sd_ms), |b| format!("was {:.0}", b.spread_ms)), col::TEXT),
-        ("drift", format!("{:.0}", rep.drift_rms_ms), "ms", "vs your own offset".into(), col::TEXT),
-        ("latency + feel", format!("{:+.0}", rep.latency_ms), "ms", "information only".into(), col::DIM),
+        ("drift", format!("{:.0}", rep.drift_rms_ms), "ms", String::new(), col::TEXT),
+        ("latency + feel", format!("{:+.0}", rep.latency_ms), "ms", String::new(), col::DIM),
     ];
     for (i, (lab, v, unit, sub, c)) in cols.iter().enumerate() {
         let cx = x + i as f32 * 150.0;
@@ -455,9 +459,11 @@ fn timing_section(p: &mut Paint, r: &ResultsState, x: f32, y: f32) {
     p.text(hx + hw - bw, base + 14.0, "+60 ms", 11.0, col::DIM, Align::Center);
 
     // per-pattern slots (lollipops)
-    let py = y + 300.0;
+    // interval errors
+    ioi_histogram(p, rep, x, y + 320.0, 1130.0, 150.0);
+
+    let py = y + 560.0;
     p.serif(x, py, "Each sixteenth, pattern by pattern", 22.0, col::TEXT, Align::Left);
-    p.text(x + 318.0, py + 3.0, "\u{b7} up is late, down is early (vs your own offset)", 12.0, col::DIM, Align::Left);
     let mut pats: Vec<(String, usize)> = Vec::new();
     for s in &rep.slots {
         match pats.iter_mut().find(|(id, _)| *id == s.pattern) {
@@ -476,6 +482,8 @@ fn timing_section(p: &mut Paint, r: &ResultsState, x: f32, y: f32) {
         let (gx, gw) = (x + 260.0, 870.0);
         let mid = ry + 58.0;
         p.hline(gx, mid, gw, col::LINE);
+        p.text(gx + gw + 6.0, mid - 26.0, "late", 10.0, col::FAINT, Align::Left);
+        p.text(gx + gw + 6.0, mid + 26.0, "early", 10.0, col::FAINT, Align::Left);
         for k in 0..16 {
             let lx = gx + gw * (k as f32 + 0.5) / 16.0;
             let lbl = ["1", "e", "+", "a"][k % 4];
@@ -495,11 +503,17 @@ fn timing_section(p: &mut Paint, r: &ResultsState, x: f32, y: f32) {
         }
     }
 
-    // whole run: drift (11-note average) vs the global offset, jitter band, sections
-    let wy = py + 30.0 + pats.len().max(1) as f32 * 120.0 + 30.0;
+    py + 30.0 + pats.len().max(1) as f32 * 120.0
+}
+
+/// Drift over the whole run: the 11-note average of the deviations from the global offset
+/// with a jitter band, section letters (shaded when not A) and pins for the weak windows.
+fn run_timeline(p: &mut Paint, r: &ResultsState, x: f32, y: f32) {
+    let rep = &r.rep;
+    let wy = y;
     p.serif(x, wy, "The whole run", 22.0, col::TEXT, Align::Left);
-    p.text(x + 150.0, wy + 3.0, &format!("\u{b7} line is the 11-note average, shade is \u{b1}{:.0} ms jitter", rep.jitter_std_ms), 12.0, col::DIM, Align::Left);
-    let (dx, dy, dw, dh) = (x, wy + 26.0, 1130.0, 130.0);
+    p.label_at(x + 1130.0, wy + 3.0, &format!("drift \u{b7} jitter \u{b1}{:.0} ms", rep.jitter_std_ms), Align::Right, col::DIM);
+    let (dx, dy, dw, dh) = (x, wy + 34.0, 1130.0, 150.0);
     let pts: Vec<(f64, f64)> = rep.notes.iter().filter_map(|n| n.dev_ms.map(|d| (n.grid_time, d))).collect();
     if pts.len() > 2 {
         let t0 = rep.notes.first().map_or(0.0, |n| n.grid_time);
@@ -557,13 +571,13 @@ fn timing_section(p: &mut Paint, r: &ResultsState, x: f32, y: f32) {
 
 fn tone_section(p: &mut Paint, r: &ResultsState, x: f32, y: f32) {
     let rep = &r.rep;
-    section_header(p, x, y, "Tone", "palm-muted and open notes, scored apart");
+    section_header(p, x, y, "Tone", "");
     let groups = [("Palm-muted notes", &rep.pm, true), ("Open notes", &rep.open, false)];
     for (i, (title, grp, pm)) in groups.iter().enumerate() {
         let gx = x + i as f32 * 587.0;
         p.serif(gx, y + 64.0, *title, 22.0, col::TEXT, Align::Left);
         if grp.n == 0 {
-            p.text(gx, y + 100.0, "none in this run", 13.0, col::FAINT, Align::Left);
+            p.text(gx, y + 100.0, "none", 13.0, col::FAINT, Align::Left);
             continue;
         }
         p.label(gx, y + 96.0, "attack evenness");
@@ -595,7 +609,6 @@ fn tone_section(p: &mut Paint, r: &ResultsState, x: f32, y: f32) {
             p.rect(gx + b as f32 * bw, y + 260.0 - h, (bw - 1.5).max(1.0), h, c);
         }
     }
-    p.text(x, y + 300.0, "Brightness = spread of the attack's spectral centroid, per note slot. No palm-mute detection: notes are grouped as the pattern marks them.", 12.0, col::FAINT, Align::Left);
 }
 
 fn draw_calibration(g: &mut Game, p: &mut Paint) {
@@ -605,7 +618,7 @@ fn draw_calibration(g: &mut Game, p: &mut Paint) {
     if rep.n_matched >= 6 {
         p.serif(720.0, 380.0, format!("{:+.1} ms", rep.latency_ms), 96.0, col::TEXT, Align::Center);
         p.text(720.0, 450.0, format!("from {} of {} clicks \u{b7} evenness {:.1} ms", rep.n_matched, rep.n_grid, rep.spread_ms), 16.0, col::DIM, Align::Center);
-        p.italic(720.0, 490.0, "Saved. Runs now report rushing and dragging against it.", 22.0, col::DIM, Align::Center);
+        p.italic(720.0, 490.0, "saved", 22.0, col::DIM, Align::Center);
     } else {
         p.italic(720.0, 380.0, "Not enough notes heard", 44.0, col::LATE, Align::Center);
         p.text(720.0, 440.0, format!("{} of {} clicks matched \u{b7} check the input level in Setup", rep.n_matched, rep.n_grid), 16.0, col::DIM, Align::Center);
@@ -618,4 +631,52 @@ fn draw_calibration(g: &mut Game, p: &mut Paint) {
         g.screen = Screen::Menu;
     }
     let _ = Font::Sans;
+}
+
+/// Histogram of the interval errors (actual minus expected time between consecutive
+/// matched attacks, ms), the quantity the evenness score is made of. Ochre hairlines mark
+/// +/- one standard deviation; evenness = that sd / sqrt(2).
+fn ioi_histogram(p: &mut Paint, rep: &ScoreReport, x: f32, y: f32, w: f32, h: f32) {
+    let devs: Vec<f64> = rep.notes.iter().filter_map(|n| n.dev_ms).collect();
+    let errs: Vec<f64> = devs.windows(2).map(|d| d[1] - d[0]).collect();
+    p.serif(x, y, "Intervals", 22.0, col::TEXT, Align::Left);
+    p.label_at(x + w - 64.0, y + 3.0, "evenness", Align::Right, col::DIM);
+    p.serif(x + w - 56.0, y, format!("{:.0}", rep.spread_ms), 26.0, col::OCHRE, Align::Left);
+    p.text(x + w, y + 4.0, "ms", 13.0, col::DIM, Align::Right);
+    const RANGE: f64 = 120.0;
+    const BIN: f64 = 5.0;
+    let nb = (2.0 * RANGE / BIN) as usize;
+    let mut bins = vec![0usize; nb];
+    for e in &errs {
+        let b = ((e + RANGE) / BIN).floor().clamp(0.0, nb as f64 - 1.0) as usize;
+        bins[b] += 1;
+    }
+    let maxb = bins.iter().copied().max().unwrap_or(0).max(1);
+    let (top, base) = (y + 34.0, y + 34.0 + h);
+    let xs = |ms: f64| x + w * ((ms.clamp(-RANGE, RANGE) + RANGE) / (2.0 * RANGE)) as f32;
+    let sd = rep.ioi_sd_ms;
+    if sd > 0.0 {
+        p.rect(xs(-sd), top, xs(sd) - xs(-sd), h, col::OCHRE_TINT);
+    }
+    let bw = w / nb as f32;
+    for (i, c) in bins.iter().enumerate() {
+        let hgt = (h - 8.0) * *c as f32 / maxb as f32;
+        if *c > 0 {
+            p.rect(x + i as f32 * bw + 1.0, base - hgt, bw - 2.0, hgt, col::DIM);
+        }
+    }
+    p.hline(x, base, w, col::TEXT);
+    p.rect(xs(0.0) - 0.5, top, 1.0, h, col::LINE);
+    if sd > 0.0 {
+        for s in [-sd, sd] {
+            p.rect(xs(s) - 0.5, top - 6.0, 1.0, h + 6.0, col::OCHRE);
+        }
+        p.serif(xs(sd) + 6.0, top + 4.0, format!("\u{b1}{sd:.0}"), 16.0, col::OCHRE, Align::Left);
+    }
+    for t in [-120.0, -60.0, 0.0, 60.0, 120.0] {
+        let lbl = if t == 120.0 { "+120 ms".to_string() } else if t == 0.0 { "0".into() } else { format!("{t:+.0}").replace('-', "\u{2212}") };
+        let al = if t == -120.0 { Align::Left } else if t == 120.0 { Align::Right } else { Align::Center };
+        p.text(xs(t), base + 16.0, lbl, 11.0, col::DIM, al);
+    }
+    p.text(x, top - 2.0, format!("{} intervals", errs.len()), 11.0, col::FAINT, Align::Left);
 }

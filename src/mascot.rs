@@ -10,7 +10,6 @@ use crate::paint::Paint;
 use crate::patterns::{BPM_MIN, BPM_STEP};
 
 pub const STAGE_NAMES: [&str; 6] = ["", "Serene", "Plugged in", "Horns up", "Storm", "Full metal"];
-pub const STAGE_NODS: [&str; 6] = ["", "soft nod", "easy nod", "firm nod", "sharp bang", "full headbang"];
 const LAYERS: [&str; 7] = ["back", "hairback", "fly", "torso", "head", "front", "over"];
 /// Source viewBox of the layers.
 const VW: f32 = 240.0;

@@ -1,12 +1,12 @@
 //! Main screen ("Guitar Guru" style): the guru reacting to the chosen tempo and
-//! ingredients, ingredient pills, a row of BPM circles with unlock lines, the Play button,
-//! the guru's stages strip and a hairline drills list.
+//! ingredients, ingredient pills, a row of BPM circles with unlock lines, the Play button
+//! and a hairline drills list.
 
 use bevy::input::ButtonInput;
 use bevy::input::keyboard::KeyCode;
 
 use crate::game::{Game, Screen, calibration_level};
-use crate::mascot::{self, MascotImages, Mood, STAGE_NAMES};
+use crate::mascot::{self, MascotImages, Mood};
 use crate::paint::{Align, Font, Paint, col, fit};
 use crate::patterns::{BPM_MAX, BPM_MIN, BPM_STEP, INGREDIENTS, Level, LevelKind, PATTERNS, bpm_steps, is_riff_continuation};
 use crate::progress::PASS_THRESHOLD;
@@ -90,11 +90,6 @@ pub fn draw(g: &mut Game, p: &mut Paint, keys: &ButtonInput<KeyCode>, imgs: &Mas
     let accent = (beats.round() as i64).rem_euclid(4) == 0;
     let pose = mascot::pose(stage, Some(beats - beats.floor()), accent);
     mascot::draw(p, imgs, 220.0, 196.0, 1.15, stage, Mood::Neutral, &pose);
-    p.label_at(357.0, 536.0, "today's guru", Align::Center, col::DIM);
-    p.serif(357.0, 566.0, STAGE_NAMES[stage as usize], 36.0, col::TEXT, Align::Center);
-    for i in 0..5 {
-        p.rect(281.0 + i as f32 * 32.0, 595.0, 26.0, 2.0, if i < stage { col::OCHRE } else { col::LINE });
-    }
 
     // ---------- ingredients
     p.label(RX, 214.0, "ingredients");
@@ -233,19 +228,6 @@ pub fn draw(g: &mut Game, p: &mut Paint, keys: &ButtonInput<KeyCode>, imgs: &Mas
     if can_play && (p.hit(bx, by, bw, bh) || keys.just_pressed(KeyCode::Enter)) {
         g.start_level(sel, false);
         return;
-    }
-
-    // ---------- stages strip
-    p.hline(120.0, 634.0, 1200.0, col::LINE);
-    p.label(120.0, 670.0, "the guru's stages");
-    for s in 1..=5u32 {
-        let x = 120.0 + (s - 1) as f32 * 135.0;
-        let still = mascot::pose(s, None, false);
-        mascot::draw(p, imgs, x + 12.0, 688.0, 0.42, s, Mood::Neutral, &still);
-        p.text(x + 62.0, 832.0, STAGE_NAMES[s as usize], 13.0, col::TEXT, Align::Center);
-        if s == stage {
-            p.rect(x, 850.0, 125.0, 2.0, col::OCHRE);
-        }
     }
 
     // ---------- drills (fit the toggled ingredients, at the selected tempo)

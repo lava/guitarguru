@@ -8,7 +8,7 @@
 use bevy::color::{Alpha, Color};
 
 use crate::game::Game;
-use crate::mascot::{self, MascotImages, Mood, STAGE_NAMES, STAGE_NODS};
+use crate::mascot::{self, MascotImages, Mood, STAGE_NAMES};
 use crate::paint::{Align, Font, Paint, col, fit};
 use crate::patterns::{BEATS_PER_BAR, INGREDIENTS, PATTERNS, Pattern, bar_seconds, beat_seconds, sixteenth_seconds};
 
@@ -67,8 +67,6 @@ pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
         let pose = mascot::pose(stage, running.then(|| beats - beats.floor()), near.rem_euclid(BEATS_PER_BAR as i64) == 0);
         mascot::draw(p, imgs, 266.0, 168.0, 0.95, stage, Mood::Neutral, &pose);
         p.label_at(946.0, 285.0, &format!("stage {stage} \u{b7} {}", STAGE_NAMES[stage as usize]), Align::Left, col::DIM);
-        p.italic(946.0, 313.0, "The guru's head lands on every", 19.0, col::DIM, Align::Left);
-        p.italic(946.0, 338.0, &format!("click, a little deeper on one ({}).", STAGE_NODS[stage as usize]), 19.0, col::DIM, Align::Left);
 
         // ---------- the click dot (dominant), fine double ring
         let (dx, dy, dr) = (720.0, 293.0, 163.0);
@@ -92,8 +90,6 @@ pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
                 }
                 p.ring(cx, dy + 24.0, 7.0, if flash > 0.5 { paper } else { col::TEXT });
             }
-        } else if t < start {
-            p.italic(dx, dy, "here we go", 28.0, if flash > 0.5 { paper } else { col::DIM }, Align::Center);
         }
 
         // ---------- current pattern
@@ -129,11 +125,14 @@ pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
                     let (lx, lw) = (141.0, 400.0);
                     p.rect(lx, y + 44.0, lw, 1.0, a(col::LINE));
                     p.rect(lx + lw * (1.0 - f), y + 43.5, lw * f, 2.0, a(col::OCHRE));
-                    // Small arrows of the next pattern (played strokes only).
-                    let hits = next_pat.hits();
-                    for n in &hits {
+                    // Count above, then small arrows of the next pattern (played strokes only).
+                    for k in 0..16 {
+                        let c = if k % 4 == 0 { col::DIM } else { col::FAINT };
+                        p.serif(600.0 + k as f32 * 26.0, y + 2.0, count_label(k), if k % 4 == 0 { 13.0 } else { 11.0 }, a(c), Align::Center);
+                    }
+                    for n in &next_pat.hits() {
                         let x = 600.0 + n.pos as f32 * 26.0;
-                        p.stroke_arrow(x, y + 26.0, 16.0, n.downstroke(), a(col::DIM));
+                        p.stroke_arrow(x, y + 30.0, 16.0, n.downstroke(), a(col::DIM));
                     }
                 }
             }
@@ -164,13 +163,22 @@ fn mix(a: Color, b: Color, k: f32) -> Color {
     Color::srgb(a.red + (b.red - a.red) * k, a.green + (b.green - a.green) * k, a.blue + (b.blue - a.blue) * k)
 }
 
-/// One bar on the 16th grid: thin pick arrows for the played strokes (current in ochre),
-/// a violet P.M. bracket over palm-muted notes, serif "1 e + a" labels below; with `tab`
-/// six hairline strings with serif fret numbers. Returns the bottom y.
+/// One bar on the 16th grid: serif "1 e + a" labels on top, a violet P.M. bracket over
+/// palm-muted notes, thin pick arrows for the played strokes (current in ochre); with `tab`
+/// six hairline strings with serif fret numbers below. Returns the bottom y.
 #[allow(clippy::too_many_arguments)]
 pub fn stroke_diagram(p: &mut Paint, pat: &Pattern, x0: f32, top: f32, cell: f32, arrow: f32, playhead: Option<f32>, pm_on: bool, tab: bool, alpha: f32) -> f32 {
     let a = |c: Color| c.with_alpha(alpha);
     let hits = pat.hits();
+    // Count labels
+    let cur16 = playhead.map(|ph| ph.floor() as i32);
+    for k in 0..16 {
+        let x = x0 + k as f32 * cell + cell / 2.0;
+        let c = if cur16 == Some(k) { col::OCHRE } else if k % 4 == 0 { col::TEXT } else { col::FAINT };
+        p.serif(x, top + 8.0, count_label(k), if k % 4 == 0 { 17.0 } else { 14.0 }, a(c), Align::Center);
+    }
+    let label_top = top;
+    let top = top + 24.0;
     // P.M. brackets
     if pm_on {
         let mut i = 0;
@@ -192,7 +200,7 @@ pub fn stroke_diagram(p: &mut Paint, pat: &Pattern, x0: f32, top: f32, cell: f32
     }
     let arrow_y = top + 16.0 + arrow / 2.0;
     let active = |pos: f64, len: f64| playhead.is_some_and(|ph| ph >= pos as f32 && ph < (pos + len) as f32);
-    let mut bottom;
+    let bottom;
     if tab {
         let names = ["e", "B", "G", "D", "A", "E"];
         let sp = 20.0;
@@ -227,24 +235,19 @@ pub fn stroke_diagram(p: &mut Paint, pat: &Pattern, x0: f32, top: f32, cell: f32
         }
         bottom = arrow_y + arrow / 2.0 + 12.0;
     }
-    // Count labels
-    let ly = bottom + 10.0;
-    let cur16 = playhead.map(|ph| ph.floor() as i32);
-    for k in 0..16 {
-        let x = x0 + k as f32 * cell + cell / 2.0;
-        let lbl = match k % 4 {
-            0 => format!("{}", k / 4 + 1),
-            1 => "e".into(),
-            2 => "+".into(),
-            _ => "a".into(),
-        };
-        let c = if cur16 == Some(k) { col::OCHRE } else if k % 4 == 0 { col::TEXT } else { col::FAINT };
-        p.serif(x, ly, lbl, if k % 4 == 0 { 17.0 } else { 14.0 }, a(c), Align::Center);
-    }
-    bottom = ly + 12.0;
     if let Some(ph) = playhead {
         let px = x0 + ph.clamp(0.0, 16.0) * cell;
-        p.rect(px - 0.75, top + 8.0, 1.5, bottom - top - 12.0, a(col::OCHRE));
+        p.rect(px - 0.75, label_top + 18.0, 1.5, bottom - label_top - 22.0, a(col::OCHRE));
     }
     bottom
+}
+
+/// "1 e + a" label of a sixteenth within the bar.
+fn count_label(k: i32) -> String {
+    match k % 4 {
+        0 => format!("{}", k / 4 + 1),
+        1 => "e".into(),
+        2 => "+".into(),
+        _ => "a".into(),
+    }
 }

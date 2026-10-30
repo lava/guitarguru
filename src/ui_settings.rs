@@ -228,7 +228,6 @@ pub fn draw(g: &mut Game, p: &mut Paint) {
         g.cfg.audio.buffer_frames = if d > 0 { (b * 2).min(1024) } else { (b / 2).max(32) };
         restart = true;
     }
-    p.text(RX, ky + 76.0, "The run starts once you've played along with four clicks.", 14.0, col::DIM, Align::Left);
 
     // ---------- latency
     let ly = 800.0;
@@ -243,7 +242,6 @@ pub fn draw(g: &mut Game, p: &mut Paint) {
         g.cfg.latency_ms = None;
         g.cfg.save();
     }
-    p.text(RX, ly + 36.0, "Optional: scores already ignore lag; this only adds rushing/dragging.", 13.0, col::DIM, Align::Left);
 
     if rebuild {
         g.rebuild_chain();
