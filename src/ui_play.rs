@@ -8,7 +8,7 @@
 use bevy::color::{Alpha, Color};
 
 use crate::game::Game;
-use crate::mascot::{self, MascotImages, Mood, STAGE_NAMES};
+use crate::mascot::{self, MascotImages, Mood};
 use crate::paint::{Align, Font, Paint, col, fit};
 use crate::patterns::{BEATS_PER_BAR, INGREDIENTS, PATTERNS, Pattern, bar_seconds, beat_seconds, sixteenth_seconds};
 
@@ -65,7 +65,8 @@ pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
         let mut pose = mascot::pose(stage, running.then_some(beats));
         pose.guide = true;
         mascot::draw(p, imgs, 266.0, 168.0, 0.95, stage, Mood::Neutral, &pose);
-        p.label_at(946.0, 285.0, &format!("stage {stage} \u{b7} {}", STAGE_NAMES[stage as usize]), Align::Left, col::DIM);
+        p.italic(946.0, 276.0, "play any note or melody.", 22.0, col::TEXT, Align::Left);
+        p.text(946.0, 306.0, "example: E 2 - 5 - 4 - 2 - 0 - 3", 14.0, col::DIM, Align::Left);
 
         // ---------- the click dot (dominant), fine double ring
         let (dx, dy, dr) = (720.0, 293.0, 163.0);
