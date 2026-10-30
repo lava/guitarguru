@@ -63,7 +63,8 @@ pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
         let beats = t / beat_s;
         let running = t >= 0.0 && (waiting || t < total);
         let stage = mascot::stage_for(bpm, mask.count_ones());
-        let pose = mascot::pose(stage, running.then_some(beats));
+        let mut pose = mascot::pose(stage, running.then_some(beats));
+        pose.guide = true;
         mascot::draw(p, imgs, 266.0, 168.0, 0.95, stage, Mood::Neutral, &pose);
         p.label_at(946.0, 285.0, &format!("stage {stage} \u{b7} {}", STAGE_NAMES[stage as usize]), Align::Left, col::DIM);
 

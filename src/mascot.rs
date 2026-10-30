@@ -16,6 +16,8 @@ pub const STAGE_NAMES: [&str; 6] = ["", "Serene", "Plugged in", "Horns up", "Sto
 const LAYERS: [&str; 8] = ["back", "hairback", "fly", "torso", "head", "front", "arm", "over"];
 /// Shoulder the raised arm swings about (viewBox units).
 const ARM_PIVOT: Vec2 = Vec2::new(166.0, 136.0);
+/// The horns hand's centre at rest (the middle of the swing).
+const ARM_HAND: Vec2 = Vec2::new(184.0, 88.0);
 /// Source viewBox of the layers.
 const VW: f32 = 240.0;
 const VH: f32 = 280.0;
@@ -71,6 +73,9 @@ pub struct Pose {
     lift: f32,
     /// Arm rotation about the shoulder, degrees (positive = clockwise on screen, down).
     arm_deg: f32,
+    /// Draw the click guide: a faint dashed line where the arm is in the middle of its
+    /// swing, i.e. on every click.
+    pub guide: bool,
 }
 
 /// Pendulum position at `beats` (beat count from the clock, beat one of a bar at multiples
@@ -100,6 +105,7 @@ pub fn pose(stage: u32, beats: Option<f64>) -> Pose {
         rot_deg: if s == 5 { -12.0 - 6.0 * u * k } else { 0.0 },
         lift: 0.5 - 0.5 * u,
         arm_deg: ARM[s] * u * k,
+        guide: false,
     }
 }
 
@@ -139,8 +145,27 @@ pub fn draw(p: &mut Paint, imgs: &MascotImages, x: f32, y: f32, scale: f32, stag
     layer(p, "torso", 1.0, 128.0, 0.0, body_dy);
     layer(p, "head", ps.sy, 128.0, ps.rot_deg, head_dy);
     layer(p, "front", 1.0, 128.0, 0.0, body_dy);
+    if ps.guide {
+        click_guide(p, &to, body_dy);
+    }
     layer_about(p, "arm", 1.0, ARM_PIVOT.y, ps.arm_deg, body_dy, ARM_PIVOT);
     layer(p, "over", 1.0, 128.0, 0.0, 0.0);
+}
+
+/// Faint ink dashes along the arm's middle position, from the shoulder to just past the
+/// horns' tips, moving with the body like the arm's pivot. Behind the arm layer, so the
+/// arm covers it as it swings through on the click.
+fn click_guide(p: &mut Paint, to: &impl Fn(f32, f32) -> Vec2, body_dy: f32) {
+    let dir = (ARM_HAND - ARM_PIVOT).normalize();
+    let (len, dash, gap) = (84.0, 5.0, 4.0);
+    let ink = Color::srgba(0.17, 0.13, 0.10, 0.3);
+    let mut d = 14.0;
+    while d + dash <= len {
+        let (a, b) = (ARM_PIVOT + dir * d, ARM_PIVOT + dir * (d + dash));
+        let (a, b) = (to(a.x, a.y + body_dy), to(b.x, b.y + body_dy));
+        p.line(a.x, a.y, b.x, b.y, ink);
+        d += dash + gap;
+    }
 }
 
 #[cfg(test)]
