@@ -1,6 +1,14 @@
 //! Attack (onset) detection on a mono DI signal. Port of the Python detector proven on
 //! real palm-muted takes: high-passed 1 ms RMS envelope in dB, 5 ms rise ("flux"), peak
 //! picking, then refinement to where the envelope first exceeds 30 % of the following peak.
+//!
+//! Dark, low-treble signals (open low strings through a bright-less pickup) put the
+//! 1.5 kHz band near its noise floor during the sustain, where the 1 ms envelope spikes
+//! once per pitch period. Those spikes can pass the contrast test about 105 ms (the
+//! minimum peak distance) after a real attack. A re-attack within `REATTACK_S` of the
+//! previous attack therefore also needs a real energy rise (`MIN_REATTACK_RISE_DB`) in at
+//! least one lower band (full band, >300 Hz, >800 Hz): a new pick stroke raises at least
+//! one of them, ringing doesn't.
 
 use serde::{Deserialize, Serialize};
 
@@ -28,6 +36,56 @@ pub struct DetectParams {
 /// real attacks above ~15 dB).
 pub const MIN_CONTRAST_DB: f64 = 12.0;
 
+/// Attacks closer than this to the previous one must show an energy rise in a lower band.
+pub const REATTACK_S: f64 = 0.15;
+/// Energy rise (dB) required of a re-attack: mean power over the 20 ms after the onset vs
+/// the 30..5 ms before it, best of the full band and the >300 Hz and >800 Hz bands. On the
+/// real takes, phantom re-triggers sit within +/-1 dB in all three; real re-attacks (also
+/// quiet palm-muted notes right after an accent) rise by 7..30 dB in at least one.
+pub const MIN_REATTACK_RISE_DB: f64 = 3.0;
+
+/// Prefix sums of x^2 of the full band and two high-passed bands, for windowed power.
+struct Bands(Vec<Vec<f64>>);
+
+impl Bands {
+    fn new(x: &[f32], sr: f64) -> Self {
+        let full: Vec<f64> = x.iter().map(|&v| f64::from(v)).collect();
+        let b300 = filtfilt(&butter_highpass(4, 300.0, sr), x);
+        let b800 = filtfilt(&butter_highpass(4, 800.0, sr), x);
+        Self(
+            [full, b300, b800]
+                .into_iter()
+                .map(|y| {
+                    let mut acc = 0.0;
+                    std::iter::once(0.0)
+                        .chain(y.iter().map(|v| {
+                            acc += v * v;
+                            acc
+                        }))
+                        .collect()
+                })
+                .collect(),
+        )
+    }
+
+    /// Best rise (dB) over the bands: power in [i, i+post) vs [i-pre_a, i-pre_b).
+    fn rise_db(&self, i: usize, post: usize, pre_a: usize, pre_b: usize) -> f64 {
+        self.0
+            .iter()
+            .map(|cs| {
+                let n = cs.len() - 1;
+                let pw = |a: usize, b: usize| {
+                    let (a, b) = (a.min(n), b.min(n));
+                    if b > a { (cs[b] - cs[a]) / (b - a) as f64 } else { 0.0 }
+                };
+                let after = pw(i, i + post);
+                let before = pw(i.saturating_sub(pre_a), i.saturating_sub(pre_b));
+                10.0 * ((after + 1e-20) / (before + 1e-20)).log10()
+            })
+            .fold(f64::NEG_INFINITY, f64::max)
+    }
+}
+
 pub fn detect(x: &[f32], p: &DetectParams) -> Vec<Onset> {
     let sr = p.sample_rate;
     if x.len() < (0.05 * sr) as usize {
@@ -46,27 +104,36 @@ pub fn detect(x: &[f32], p: &DetectParams) -> Vec<Onset> {
     let max_loud = loud.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let w30 = (0.03 * sr) as usize;
     let (pre_a, pre_b) = ((0.040 * sr) as usize, lag);
-    peaks
-        .into_iter()
-        .filter(|&pk| loud[pk] > max_loud - p.dynamic_range_db)
-        .filter_map(|pk| {
-            let end = (pk + w30).min(env.len());
-            let top = env[pk..end].iter().copied().fold(0.0, f64::max);
-            let from = pk.saturating_sub(lag);
-            let start = from + env[from..end].iter().position(|&e| e > 0.3 * top).unwrap_or(0);
-            // Contrast against what was ringing just before.
-            let (a, b) = (start.saturating_sub(pre_a), start.saturating_sub(pre_b));
-            if b > a {
-                let pre = crate::dsp::median(&env[a..b]).unwrap_or(0.0);
-                if 20.0 * (top / (pre + 1e-12)).log10() < MIN_CONTRAST_DB {
-                    return None;
-                }
+    let reattack = (REATTACK_S * sr) as usize;
+    let (rise_post, rise_a) = ((0.020 * sr) as usize, (0.030 * sr) as usize);
+    let mut bands: Option<Bands> = None;
+    let mut out: Vec<Onset> = Vec::new();
+    let mut last: Option<usize> = None;
+    for pk in peaks.into_iter().filter(|&pk| loud[pk] > max_loud - p.dynamic_range_db) {
+        let end = (pk + w30).min(env.len());
+        let top = env[pk..end].iter().copied().fold(0.0, f64::max);
+        let from = pk.saturating_sub(lag);
+        let start = from + env[from..end].iter().position(|&e| e > 0.3 * top).unwrap_or(0);
+        // Contrast against what was ringing just before.
+        let (a, b) = (start.saturating_sub(pre_a), start.saturating_sub(pre_b));
+        if b > a {
+            let pre = crate::dsp::median(&env[a..b]).unwrap_or(0.0);
+            if 20.0 * (top / (pre + 1e-12)).log10() < MIN_CONTRAST_DB {
+                continue;
             }
-            let aend = (start + w30).min(x.len());
-            let peak = x[start..aend].iter().fold(0.0f32, |m, v| m.max(v.abs()));
-            Some(Onset { time: start as f64 / sr, level_db: 20.0 * (f64::from(peak) + 1e-9).log10() })
-        })
-        .collect()
+        }
+        if last.is_some_and(|l| start - l.min(start) < reattack) {
+            let bands = bands.get_or_insert_with(|| Bands::new(x, sr));
+            if bands.rise_db(start, rise_post, rise_a, lag) < MIN_REATTACK_RISE_DB {
+                continue;
+            }
+        }
+        last = Some(start);
+        let aend = (start + w30).min(x.len());
+        let peak = x[start..aend].iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        out.push(Onset { time: start as f64 / sr, level_db: 20.0 * (f64::from(peak) + 1e-9).log10() });
+    }
+    out
 }
 
 #[cfg(test)]
