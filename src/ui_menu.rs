@@ -102,7 +102,7 @@ pub fn draw(g: &mut Game, p: &mut Paint, keys: &ButtonInput<KeyCode>, imgs: &Mas
     let mut x = RX;
     let mut hint = None;
     for (i, ing) in INGREDIENTS.iter().enumerate() {
-        let short = if ing.code == "16" { "16ths" } else { ing.name };
+        let short = ing.short;
         let w = 62.0 + short.len() as f32 * 8.4;
         let (y, h) = (236.0, 42.0);
         let on = mix & ing.bit != 0;

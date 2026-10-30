@@ -6,6 +6,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::patterns::{BASE_BPM, BPM_MAX, BPM_MIN, BPM_STEP, INGREDIENTS, LH, Level, LevelKind, PM, S16, first_ingredients};
+#[cfg(test)]
+use crate::patterns::SYNC;
 
 /// Combined score (percent) needed to pass a level.
 pub const PASS_THRESHOLD: f64 = 60.0;
@@ -40,7 +42,13 @@ pub struct Progress {
     /// same combination can pass over them.
     #[serde(default)]
     pub recent_patterns: BTreeMap<String, Vec<Vec<String>>>,
+    /// Layout version of this file (see `migrate`); 0 for files from before versioning.
+    #[serde(default)]
+    pub version: u32,
 }
+
+/// Current `Progress::version`. 1: Syncopation became the first ingredient.
+pub const PROGRESS_VERSION: u32 = 1;
 
 /// Runs per combination whose patterns the next run avoids.
 pub const RECENT_RUNS: usize = 3;
@@ -85,7 +93,7 @@ impl Progress {
 
 /// Relative difference in mean pattern difficulty from which the results screen notes that
 /// a run is not directly comparable with the best one.
-pub const DIFFICULTY_NOTE: f64 = 0.08;
+pub const DIFFICULTY_NOTE: f64 = 0.12;
 
 /// A note for the results screen when this run's patterns (mean difficulty `now`) were
 /// notably harder or easier than those of the previous best `best` of the same level.
@@ -116,7 +124,7 @@ impl Unlock {
 
 impl Progress {
     pub fn fresh() -> Self {
-        Self::default()
+        Self { version: PROGRESS_VERSION, ..Self::default() }
     }
 
     pub fn path() -> PathBuf {
@@ -174,7 +182,16 @@ impl Progress {
                 h.key = Level::run(m, bpm).key();
             }
         }
-        self.ingredients = self.ingredients.max((max_tier as usize).saturating_sub(1)).min(INGREDIENTS.len());
+        // Counted in the order before syncopation (palm mutes first).
+        self.ingredients = self.ingredients.max((max_tier as usize).saturating_sub(1));
+        // Version 1 put syncopation first in the unlock order: whoever had palm mutes keeps
+        // everything they had and gets syncopation too.
+        if self.version < 1 && self.ingredients > 0 {
+            self.ingredients += 1;
+            self.fresh.insert("ingredient:sync".into());
+        }
+        self.version = PROGRESS_VERSION;
+        self.ingredients = self.ingredients.min(INGREDIENTS.len());
         self.fresh.retain(|k| Level::from_key(k).is_some() || k.starts_with("ingredient:"));
     }
 
@@ -285,31 +302,33 @@ mod tests {
         let mut p = Progress::fresh();
         assert!(p.is_unlocked(&Level::run(0, 80)));
         assert!(!p.is_unlocked(&Level::run(0, 100)));
-        assert!(!p.is_unlocked(&Level::run(PM, 80)), "palm mutes still locked");
+        assert!(!p.is_unlocked(&Level::run(SYNC, 80)), "syncopation still locked");
         let quarters = PATTERNS.iter().position(|q| q.id == "quarters").unwrap();
-        let pm_q = PATTERNS.iter().position(|q| q.id == "pm_quarters").unwrap();
-        assert!(p.is_unlocked(&Level::drill(quarters, 80)) && !p.is_unlocked(&Level::drill(pm_q, 80)));
+        let offbeats = PATTERNS.iter().position(|q| q.id == "offbeats").unwrap();
+        assert!(p.is_unlocked(&Level::drill(quarters, 80)) && !p.is_unlocked(&Level::drill(offbeats, 80)));
         // Drills keep their own best but unlock nothing.
         assert!(p.record(&Level::drill(quarters, 80), 95.0).is_empty());
         assert!(p.record(&Level::run(0, 80), 50.0).is_empty());
-        // Passing basic at 80 (all unlocked ingredients = none) unlocks palm mutes and 60/100.
+        // Passing basic at 80 (all unlocked ingredients = none) unlocks syncopation and 60/100.
         let newly = p.record(&Level::run(0, 80), 85.0);
         assert_eq!(newly, vec![Unlock::Ingredient(0), Unlock::Tempo(Level::run(0, 100)), Unlock::Tempo(Level::run(0, 60))]);
-        assert!(p.is_unlocked(&Level::run(PM, 80)) && p.is_unlocked(&Level::drill(pm_q, 80)));
-        assert!(!p.is_unlocked(&Level::run(PM, 100)), "tempos open per ingredient set");
+        assert_eq!(INGREDIENTS[0].bit, SYNC, "syncopation comes first");
+        assert!(p.is_unlocked(&Level::run(SYNC, 80)) && p.is_unlocked(&Level::drill(offbeats, 80)));
+        assert!(!p.is_unlocked(&Level::run(PM, 80)), "palm mutes come next");
+        assert!(!p.is_unlocked(&Level::run(SYNC, 100)), "tempos open per ingredient set");
         // A run without all unlocked ingredients does not unlock the next one.
         let newly = p.record(&Level::run(0, 100), 90.0);
         assert!(!newly.iter().any(|u| matches!(u, Unlock::Ingredient(_))), "{newly:?}");
         assert_eq!(p.ingredients, 1);
         // Below 80 BPM never unlocks ingredients.
         p.record(&Level::run(0, 60), 90.0);
-        assert!(p.record(&Level::run(PM, 60), 0.0).is_empty());
-        assert!(!p.is_unlocked(&Level::run(PM, 60)), "60 not open for PM yet");
+        assert!(p.record(&Level::run(SYNC, 60), 0.0).is_empty());
+        assert!(!p.is_unlocked(&Level::run(SYNC, 60)), "60 not open for syncopation yet");
     }
 
     #[test]
     fn superset_runs_open_subset_tempos() {
-        let mut p = Progress { ingredients: 3, ..Default::default() };
+        let mut p = Progress { ingredients: 4, ..Progress::fresh() };
         p.record(&Level::run(PM | S16, 120), 85.0);
         for m in [0, PM, S16, PM | S16] {
             assert!(p.is_unlocked(&Level::run(m, 100)) && p.is_unlocked(&Level::run(m, 140)), "mask {m}");
@@ -318,7 +337,7 @@ mod tests {
         assert!(!p.is_unlocked(&Level::run(PM | S16 | LH, 100)));
         assert!(!p.is_unlocked(&Level::run(0, 160)), "only neighbours");
         // An ingredient that is still locked keeps everything with it closed.
-        let p2 = Progress { ingredients: 1, best: p.best.clone(), ..Default::default() };
+        let p2 = Progress { ingredients: 2, best: p.best.clone(), ..Progress::fresh() };
         assert!(!p2.is_unlocked(&Level::run(S16, 100)));
         assert!(p2.is_unlocked(&Level::run(PM, 100)));
     }
@@ -344,7 +363,7 @@ mod tests {
         let best = |d| HistoryEntry { difficulty: d, ..Default::default() };
         assert_eq!(difficulty_note(3.0, None), None);
         assert_eq!(difficulty_note(3.0, Some(&best(None))), None, "old entries have no difficulty");
-        assert_eq!(difficulty_note(3.1, Some(&best(Some(3.0)))), None);
+        assert_eq!(difficulty_note(3.3, Some(&best(Some(3.0)))), None, "within 12 %");
         assert!(difficulty_note(3.5, Some(&best(Some(3.0)))).unwrap().starts_with("harder"));
         assert!(difficulty_note(2.5, Some(&best(Some(3.0)))).unwrap().starts_with("easier"));
     }
@@ -364,7 +383,29 @@ mod tests {
         assert_eq!(p.best.get("gallop@120"), Some(&77.0));
         assert!(!p.best.contains_key("triplet_gallop@80"));
         assert!(p.unlocked.is_empty());
-        assert_eq!(p.ingredients, INGREDIENTS.len().min(5));
+        assert_eq!(p.ingredients, INGREDIENTS.len());
         assert!(p.is_unlocked(&Level::run(0, 100)), "derived from the passed basic run at 80");
+    }
+
+    #[test]
+    fn syncopation_joins_existing_unlocks() {
+        let load = |json: &str| {
+            let mut p: Progress = serde_json::from_str(json).unwrap();
+            p.migrate();
+            p
+        };
+        // Palm mutes and 16ths unlocked before syncopation existed.
+        let p = load(r#"{"best":{"mix:pm+16@100":70.0},"ingredients":2}"#);
+        assert_eq!(p.unlocked_mask(), SYNC | PM | S16);
+        assert!(p.fresh.contains("ingredient:sync"));
+        assert_eq!(p.best(&Level::run(PM | S16, 100)), Some(70.0));
+        assert_eq!(load(&serde_json::to_string(&p).unwrap()).ingredients, 3, "migrates once");
+        // Nothing unlocked yet: syncopation is the next one.
+        let p = load(r#"{"best":{"mix:basic@80":40.0},"ingredients":0}"#);
+        assert_eq!(p.ingredients, 0);
+        assert_eq!(p.version, PROGRESS_VERSION);
+        // Everything unlocked stays everything.
+        assert_eq!(load(r#"{"ingredients":4}"#).ingredients, INGREDIENTS.len());
+        assert!(!Progress::fresh().fresh.contains("ingredient:sync"));
     }
 }

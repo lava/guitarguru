@@ -21,7 +21,7 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
 
-use crate::patterns::{Fretting, LH, PATTERNS, PM, Pattern, S16, SEGMENT_BARS, Sequence, TREM, sixteenth_seconds};
+use crate::patterns::{Fretting, LH, PATTERNS, PM, Pattern, S16, SEGMENT_BARS, SYNC, Sequence, TREM, sixteenth_seconds};
 
 // ---------------------------------------------------------------- randomness
 
@@ -147,9 +147,19 @@ impl Fig {
     }
 }
 
-const FIGS_8: &[(Fig, f64)] = &[(Fig::Quarter, 3.0), (Fig::Eighths, 3.0), (Fig::Offbeat, 1.2)];
-const FIGS_16: &[(Fig, f64)] =
-    &[(Fig::Gallop, 3.5), (Fig::Reverse, 2.5), (Fig::Sixteens, 1.2), (Fig::Dotted, 1.0), (Fig::Pickup, 1.0), (Fig::Off16, 0.4)];
+/// Beat figures with their weights and the ingredients they need. Figures whose beat starts
+/// silent (offbeats, 16th pickups, offbeat 16ths) are syncopation.
+const FIGS: &[(Fig, f64, u8)] = &[
+    (Fig::Quarter, 3.0, 0),
+    (Fig::Eighths, 3.0, 0),
+    (Fig::Offbeat, 1.2, SYNC),
+    (Fig::Gallop, 3.5, S16),
+    (Fig::Reverse, 2.5, S16),
+    (Fig::Sixteens, 1.2, S16),
+    (Fig::Dotted, 1.0, S16),
+    (Fig::Pickup, 1.0, S16 | SYNC),
+    (Fig::Off16, 0.4, S16 | SYNC),
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Form {
@@ -218,23 +228,24 @@ struct Rhythm {
 
 /// Whole-bar idioms: cells, name, ingredients needed.
 const IDIOMS: &[(&str, &str, u8)] = &[
-    ("x-----x-----x---", "Tresillo (3-3-2)", 0),
-    ("x-----x-----x-x-", "Tresillo + 8ths", 0),
-    ("x---x-x---x-x---", "Push on the + of 3", 0),
-    ("x-x---x-x---x-x-", "Push on the + of 2", 0),
-    ("x--x--x-x--x--x-", "3-3-2 16ths", S16),
-    ("x--x--x-x-xxx-xx", "3-3-2, then gallops", S16),
-    ("x-xxx-xxx--x--x-", "Gallops, then 3-3-2", S16),
+    ("x-----x-----x---", "Tresillo (3-3-2)", SYNC),
+    ("x-----x-----x-x-", "Tresillo + 8ths", SYNC),
+    ("x---x-x---x-x---", "Push on the + of 3", SYNC),
+    ("x-x---x-x---x-x-", "Push on the + of 2", SYNC),
+    ("x--x--x-x--x--x-", "3-3-2 16ths", S16 | SYNC),
+    ("x--x--x-x-xxx-xx", "3-3-2, then gallops", S16 | SYNC),
+    ("x-xxx-xxx--x--x-", "Gallops, then 3-3-2", S16 | SYNC),
     ("xxxxxxxxxxxxxxxx", "Tremolo", S16 | TREM),
     ("xxxxxxxxx---x---", "Tremolo, then quarters", S16 | TREM),
     ("x---x---xxxxxxxx", "Quarters, then tremolo", S16 | TREM),
     ("xxxxxxxxx-xxx-xx", "Tremolo, then gallops", S16 | TREM),
     ("xxxxxxxxxxxx----", "Tremolo, rest on 4", S16 | TREM),
-    ("xxxxxxxx--x---x-", "Tremolo, offbeats on 3 & 4", S16 | TREM),
+    ("xxxxxxxx--x---x-", "Tremolo, offbeats on 3 & 4", S16 | TREM | SYNC),
 ];
 
 fn rhythm(rng: &mut Rng, mask: u8) -> Rhythm {
     let s16 = mask & S16 != 0;
+    let sync = mask & SYNC != 0;
     let idioms: Vec<(usize, f64)> = IDIOMS
         .iter()
         .enumerate()
@@ -249,16 +260,14 @@ fn rhythm(rng: &mut Rng, mask: u8) -> Rhythm {
         }
         return Rhythm { on, name: name.to_string(), off_start: false };
     }
-    let mut figs: Vec<(Fig, f64)> = FIGS_8.to_vec();
-    if s16 {
-        figs.extend_from_slice(FIGS_16);
-    }
+    let figs: Vec<(Fig, f64)> = FIGS.iter().filter(|f| f.2 & !mask == 0).map(|f| (f.0, f.1)).collect();
     let pick = |rng: &mut Rng, ok: &dyn Fn(Fig) -> bool| -> Fig {
         let c: Vec<(Fig, f64)> = figs.iter().copied().filter(|&(f, _)| ok(f)).collect();
         rng.weighted(&c)
     };
     let form = rng.weighted(&[(Form::Uniform, 1.5), (Form::Abab, 3.0), (Form::Aaab, 3.0), (Form::Aaba, 1.0), (Form::Free, 1.5)]);
-    let with_rest = |rng: &mut Rng, ok: &dyn Fn(Fig) -> bool| if rng.chance(0.18) { Fig::Rest } else { pick(rng, ok) };
+    // Without syncopation the only silent beat is beat 4 (`last`).
+    let with_rest = |rng: &mut Rng, ok: &dyn Fn(Fig) -> bool, last: bool| if (sync || last) && rng.chance(0.18) { Fig::Rest } else { pick(rng, ok) };
     let bar: [Fig; 4] = match form {
         Form::Uniform => {
             let a = pick(rng, &|_| true);
@@ -271,19 +280,19 @@ fn rhythm(rng: &mut Rng, mask: u8) -> Rhythm {
         }
         Form::Aaab => {
             let a = pick(rng, &Fig::on_beat);
-            let b = with_rest(rng, &|f| f != a);
+            let b = with_rest(rng, &|f| f != a, true);
             [a, a, a, b]
         }
         Form::Aaba => {
             let a = pick(rng, &Fig::on_beat);
-            let b = with_rest(rng, &|f| f != a);
+            let b = with_rest(rng, &|f| f != a, false);
             [a, a, b, a]
         }
         Form::Free => {
             let a = pick(rng, &Fig::on_beat);
             let mut bar = [a; 4];
-            for slot in bar.iter_mut().skip(1) {
-                *slot = if rng.chance(0.45) { a } else { with_rest(rng, &|_| true) };
+            for (i, slot) in bar.iter_mut().enumerate().skip(1) {
+                *slot = if rng.chance(0.45) { a } else { with_rest(rng, &|_| true, i == 3) };
             }
             bar
         }
@@ -347,8 +356,8 @@ fn palm_mutes(rng: &mut Rng, on: &[bool; 16], tremolo: bool) -> (Vec<bool>, &'st
         return (vec![true; pos.len()], "P.M.");
     }
     let suffix = match style {
-        PmStyle::Open1 => "P.M., open 1",
-        PmStyle::Open13 => "P.M., open 1 & 3",
+        PmStyle::Open1 => "P.M. + open 1",
+        PmStyle::Open13 => "P.M. + open 1 & 3",
         _ => "P.M. + accents",
     };
     (open.iter().map(|o| !o).collect(), suffix)
@@ -500,7 +509,21 @@ pub fn features(p: &Pattern) -> u8 {
     if p.frettings().iter().any(|x| *x != Fretting::OPEN_E) {
         f |= LH;
     }
+    if syncopated(&pos) {
+        f |= SYNC;
+    }
     f
+}
+
+/// Syncopation: a beat with notes but a silent downbeat (offbeat- or upstroke-led, pushes,
+/// 3-3-2), a silent beat 1, or a lone 16th on the "a" ringing into the next beat
+/// (anticipation; the end of a 16th burst before a rest doesn't count). Plain bars with a rest on 4 or a pickup on the "+" of 4 are not
+/// syncopated. (Rests on beats 2 and 3 aren't either, but basic bars avoid them anyway.)
+pub fn syncopated(pos: &[usize]) -> bool {
+    let on = |q: usize| pos.contains(&(q % 16));
+    let offbeat_led = (0..4).any(|b| !on(b * 4) && (1..4).any(|i| on(b * 4 + i)));
+    let anticipation = pos.iter().any(|&q| q % 4 == 3 && !on(q + 1) && !on(q - 1));
+    offbeat_led || !on(0) || anticipation
 }
 
 /// Can the bar be played at this tempo with these ingredients? Caps 16th runs (tremolo
@@ -586,7 +609,7 @@ pub fn generate(rng: &mut Rng, mask: u8, bpm: u32) -> Option<Pattern> {
     let on = r.on;
     let pos: Vec<usize> = (0..16).filter(|&i| on[i]).collect();
     // Shape rules: enough notes, beat 1 played (unless an offbeat figure), no long silence.
-    if pos.len() < 3 || (!on[0] && !r.off_start) {
+    if pos.len() < 3 || (!on[0] && !(r.off_start && mask & SYNC != 0)) {
         return None;
     }
     let gap = (0..pos.len()).map(|k| (pos[(k + 1) % pos.len()] + 16 - pos[k] - 1) % 16 + 1).max().unwrap_or(16);
@@ -594,11 +617,9 @@ pub fn generate(rng: &mut Rng, mask: u8, bpm: u32) -> Option<Pattern> {
         return None;
     }
     let tremolo = max_run16(&pos) >= 8;
-    let mut name = r.name;
+    // Name: the rhythm plus one tag (the fretting style if any, else the palm-mute style).
+    let name = r.name;
     let (pm, pm_name) = if mask & PM != 0 { palm_mutes(rng, &on, tremolo) } else { (vec![false; pos.len()], "") };
-    if !pm_name.is_empty() {
-        name = format!("{name}, {pm_name}");
-    }
     let accents: Vec<bool> = pm.iter().map(|m| !m).collect();
     let mut frets = None;
     if mask & LH != 0 && rng.chance(0.8) {
@@ -613,9 +634,10 @@ pub fn generate(rng: &mut Rng, mask: u8, bpm: u32) -> Option<Pattern> {
     }
     let p = match &frets {
         Some((fr, lh_name)) => build(&on, &pm, Some(fr), &format!("{name}, {lh_name}"), mask),
+        None if !pm_name.is_empty() => build(&on, &pm, None, &format!("{name}, {pm_name}"), mask),
         None => build(&on, &pm, None, &name, mask),
     };
-    playable(&p, bpm, mask).then_some(p)
+    (playable(&p, bpm, mask) && features(&p) & !mask == 0).then_some(p)
 }
 
 /// The pattern for played cells `on` with palm mutes and frettings per played note.
@@ -802,7 +824,21 @@ mod tests {
     use super::*;
     use crate::patterns::{BPM_MAX, BPM_MIN, bpm_steps, parse};
 
-    const MASKS: [u8; 9] = [0, PM, S16, PM | S16, LH, PM | LH, PM | S16 | LH, S16 | TREM, PM | S16 | LH | TREM];
+    const MASKS: [u8; 13] = [
+        0,
+        SYNC,
+        PM,
+        S16,
+        PM | S16,
+        SYNC | S16,
+        SYNC | PM | S16,
+        LH,
+        PM | LH,
+        PM | S16 | LH,
+        S16 | TREM,
+        PM | S16 | LH | TREM,
+        SYNC | PM | S16 | LH | TREM,
+    ];
 
     fn samples(mask: u8, bpm: u32, n: usize) -> Vec<Pattern> {
         let mut rng = Rng::new(hash_str(&format!("{mask}:{bpm}")));
@@ -820,7 +856,9 @@ mod tests {
                 let none = HashSet::new();
                 let v: Vec<f64> = (0..12).map(|seed| avg(&run_sequence(mask, bpm, bars, seed, if seed % 2 == 0 { &avoid } else { &none }))).collect();
                 let m = v.iter().sum::<f64>() / v.len() as f64;
-                assert!(v.iter().all(|d| (d / m - 1.0).abs() < 0.12), "mask {mask} @{bpm}: {v:.2?}");
+                // Small pools at slow tempos have fewer difficulty steps to pick from.
+                let tol = if bpm < 100 { 0.15 } else { 0.12 };
+                assert!(v.iter().all(|d| (d / m - 1.0).abs() < tol), "mask {mask} @{bpm}: {v:.2?}");
             }
         }
     }
@@ -893,6 +931,14 @@ mod tests {
                     if mask & TREM == 0 {
                         assert!(max_run16(&pos) <= 5, "tremolo without the ingredient: {what}");
                     }
+                    if mask & SYNC == 0 {
+                        assert!(!syncopated(&pos), "syncopation without the ingredient: {what}");
+                        // Every beat starts with a downstroke; only beat 4 may rest.
+                        for b in 0..3 {
+                            assert!(pos.contains(&(b * 4)), "beat {} silent: {what}", b + 1);
+                        }
+                        assert!(pos.iter().all(|&q| q % 4 == 0 || pos.contains(&(q / 4 * 4))), "{what}");
+                    }
                     // Musical shape and playability.
                     assert!(pos.contains(&0) || p.name.starts_with("Offbeat"), "beat 1: {what}");
                     assert!(pos.len() >= 3, "{what}");
@@ -923,6 +969,21 @@ mod tests {
     }
 
     #[test]
+    fn syncopation_is_recognised() {
+        let sync = |n: &str| syncopated(&positions(&Pattern { notation: n.to_string().into(), ..PATTERNS[0].clone() }));
+        for plain in ["8:D-D-D-D-", "8:DUDUDU--", "8:D-D-D-DU", "8:D-DUD-D-", "16:D-DUD-DUD-DUD-DU", "16:DUD-DUD-DUD-DUD-", "16:D--UD--UD--UD---"] {
+            assert!(!sync(plain), "{plain}");
+        }
+        for s in ["8:-U-U-U-U", "8:D--U--D-", "8:DU-UD-DU", "16:D--U--D-D--U--D-", "16:D---D---D-----DU", "16:D--U----D-D-D-D-"] {
+            assert!(sync(s), "{s}");
+        }
+        // Curated patterns declare it.
+        for p in PATTERNS.iter().filter(|p| p.in_tracks) {
+            assert_eq!(features(p) & SYNC, p.needs & SYNC, "{}", p.id);
+        }
+    }
+
+    #[test]
     fn names_read_well() {
         use Fig::*;
         assert_eq!(figure_name(&[Gallop, Quarter, Gallop, Quarter]), "Gallop on 1 & 3");
@@ -950,7 +1011,12 @@ mod tests {
             let p = pool(mask, 120, 7, POOL_ATTEMPTS);
             let ids: HashSet<&str> = p.iter().map(|e| &*e.pattern.id).collect();
             assert_eq!(ids.len(), p.len(), "distinct ids");
-            assert!(p.len() >= if mask == 0 { 25 } else { 60 }, "mask {mask}: {}", p.len());
+            let min = match mask {
+                0 => 12,
+                SYNC | PM => 30,
+                _ => 60,
+            };
+            assert!(p.len() >= min, "mask {mask}: {}", p.len());
             assert!(p.iter().any(|e| e.featured) || mask == 0);
         }
     }
@@ -999,7 +1065,8 @@ mod tests {
                 first += d[1..segs / 2].iter().sum::<f64>() / (segs / 2 - 1) as f64;
                 second += d[segs / 2..].iter().sum::<f64>() / (segs - segs / 2) as f64;
             }
-            assert!(second > 1.2 * first, "mask {mask}: {first} vs {second}");
+            // The basic pool is deliberately plain, so its ramp is flatter.
+            assert!(second > if mask == 0 { 1.1 } else { 1.2 } * first, "mask {mask}: {first} vs {second}");
         }
     }
 

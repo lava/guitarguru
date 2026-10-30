@@ -98,6 +98,8 @@ pub struct Ingredient {
     pub bit: u8,
     pub code: &'static str,
     pub name: &'static str,
+    /// Label of the ingredient's pill on the main screen.
+    pub short: &'static str,
     #[allow(dead_code)] // descriptive data for future UI
     pub about: &'static str,
 }
@@ -106,12 +108,16 @@ pub const PM: u8 = 1;
 pub const S16: u8 = 2;
 pub const LH: u8 = 4;
 pub const TREM: u8 = 8;
+/// Syncopation: offbeat-led beats, pushes, 3-3-2 and anticipations (the bit is new, its
+/// place in the unlock order is first).
+pub const SYNC: u8 = 16;
 
 pub const INGREDIENTS: &[Ingredient] = &[
-    Ingredient { bit: PM, code: "pm", name: "Palm mutes", about: "the basic rhythms, partly palm-muted" },
-    Ingredient { bit: S16, code: "16", name: "16th notes", about: "gallops, reverse gallops, 16ths with gaps, offbeat 16ths" },
-    Ingredient { bit: LH, code: "lh", name: "Note changes", about: "low E and A string notes, then power chords (tab view)" },
-    Ingredient { bit: TREM, code: "trem", name: "Tremolo", about: "sustained 16th tremolo: bursts and full bars" },
+    Ingredient { bit: SYNC, code: "sync", name: "Syncopation", short: "Sync", about: "offbeats, pushes, tresillo and 3-3-2, upstroke-led figures" },
+    Ingredient { bit: PM, code: "pm", name: "Palm mutes", short: "P.M.", about: "the basic rhythms, partly palm-muted" },
+    Ingredient { bit: S16, code: "16", name: "16th notes", short: "16ths", about: "gallops, reverse gallops, 16ths with gaps (offbeat 16ths with syncopation)" },
+    Ingredient { bit: LH, code: "lh", name: "Note changes", short: "Note changes", about: "low E and A string notes, then power chords (tab view)" },
+    Ingredient { bit: TREM, code: "trem", name: "Tremolo", short: "Tremolo", about: "sustained 16th tremolo: bursts and full bars" },
 ];
 
 /// Mask of the first `n` ingredients.
@@ -165,7 +171,8 @@ const fn riff(id: &'static str, name: &'static str, needs: u8, notation: &'stati
 /// All patterns. Add new ones here. Every run starts with `quarters`; the rest of its
 /// pool is ordered by distance from quarters.
 pub const PATTERNS: &[Pattern] = &[
-    // Basic: the eighth grid (down on the beat, up on the "+"), open.
+    // Basic: the eighth grid (down on the beat, up on the "+"), open, every beat led by a
+    // downstroke. Syncopated figures need the syncopation ingredient.
     pat("quarters", "Quarters", 0, "8:D-D-D-D-"),
     pat("q_pickup", "Quarters + pickup", 0, "8:D-D-D-DU"),
     pat("q_and2", "Quarters + and-of-2", 0, "8:D-DUD-D-"),
@@ -174,11 +181,11 @@ pub const PATTERNS: &[Pattern] = &[
     pat("ee_q", "Eighth, eighth, quarter", 0, "8:DUD-DUD-"),
     pat("mixed_bar", "Mixed bar", 0, "8:D-DUDUD-"),
     pat("mixed_bar2", "Mixed bar 2", 0, "8:DUD-D-DU"),
-    pat("dotted", "Dotted quarter + eighth", 0, "8:D--UD--U"),
+    pat("dotted", "Dotted quarter + eighth", SYNC, "8:D--UD--U"),
     pat("alt_eighths", "Eighths (alternate)", 0, "8:DUDUDUDU"),
     pat("eighths", "Eighths (all down)", 0, "8:DDDDDDDD"),
-    pat("skip_beat", "Skip 2 and 4", 0, "8:DU-UDU-U"),
-    pat("offbeats", "Offbeats", 0, "8:-U-U-U-U"),
+    pat("skip_beat", "Skip 2 and 4", SYNC, "8:DU-UDU-U"),
+    pat("offbeats", "Offbeats", SYNC, "8:-U-U-U-U"),
     // Palm mutes: the basic rhythms, partly or fully palm-muted.
     pat("pm_quarters", "P.M. quarters", PM, "8:d-d-d-d-"),
     pat("pm_q_open4", "P.M. quarters, open 4", PM, "8:d-d-d-D-"),
@@ -188,7 +195,7 @@ pub const PATTERNS: &[Pattern] = &[
     pat("pm_ee_q", "P.M. eighth, eighth, quarter", PM, "8:dud-dud-"),
     pat("pm_then_open", "P.M. half, open half", PM, "8:d-dudUD-"),
     pat("pm_alt", "P.M. eighths (alternate)", PM, "8:dudududu"),
-    pat("pm_dotted", "P.M. dotted + open pickup", PM, "8:d--Ud--U"),
+    pat("pm_dotted", "P.M. dotted + open pickup", PM | SYNC, "8:d--Ud--U"),
     // 16th notes. P.M. markings here only apply when palm mutes are active too.
     pat("one_gallop", "One gallop", S16, "16:d-dud---d---d---"),
     pat("gallop_half", "Gallops on 1 and 3", S16, "16:d-dud---d-dud---"),
@@ -198,7 +205,7 @@ pub const PATTERNS: &[Pattern] = &[
     pat("gallop_reverse", "Gallop + reverse", S16, "16:d-dudud-d-dudud-"),
     pat("sixteenths_eighths", "16ths + eighths", S16, "16:dudud-d-dudud-d-"),
     pat("skip_and", "16ths, skip the +", S16, "16:du-udu-udu-udu-u"),
-    pat("offbeat16", "Offbeat 16ths", S16, "16:-u-u-u-u-u-u-u-u"),
+    pat("offbeat16", "Offbeat 16ths", S16 | SYNC, "16:-u-u-u-u-u-u-u-u"),
     pat("bursts", "Tremolo bursts", S16 | TREM, "16:dudu----dudu----"),
     pat("tremolo", "Tremolo 16ths", S16 | TREM, "16:dudududududududu"),
     // Note changes (E standard, low E and A strings, then power chords).
