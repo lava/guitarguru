@@ -61,7 +61,7 @@ fn radio_inline(p: &mut Paint, x: f32, y: f32, label: &str, on: bool, size: f32)
 
 pub fn draw(g: &mut Game, p: &mut Paint) {
     header(p, "Setup", false);
-    if link(p, 1270.0, 66.0, "Tempo path") {
+    if link(p, 1270.0, 66.0, "Main menu") {
         g.screen = Screen::Menu;
         return;
     }

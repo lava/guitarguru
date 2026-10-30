@@ -65,7 +65,7 @@ pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
     let playing = g.engine.as_ref().and_then(|e| e.playback_pos());
 
     // ---------- top bar
-    if link(p, 192.0, 54.0, "Tempo path") {
+    if link(p, 192.0, 54.0, "Main menu") {
         action = Action::Menu;
     }
     let lvl = r.run.level;
@@ -82,7 +82,7 @@ pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
         if p.button(1073.0, 34.0, 170.0, 44.0, &format!("Next: {} BPM", n.bpm), true) {
             action = Action::Start(n);
         }
-    } else if p.button(1073.0, 34.0, 170.0, 44.0, "Tempo path", true) {
+    } else if p.button(1073.0, 34.0, 170.0, 44.0, "Main menu", true) {
         action = Action::Menu;
     }
 

@@ -5,7 +5,7 @@
 use bevy::input::ButtonInput;
 use bevy::input::keyboard::KeyCode;
 
-use crate::game::{Game, Screen, calibration_level};
+use crate::game::{Game, Screen};
 use crate::mascot::{self, MascotImages, Mood};
 use crate::paint::{Align, Font, Paint, col, fit};
 use crate::patterns::{BPM_MAX, BPM_MIN, BPM_STEP, INGREDIENTS, Level, LevelKind, PATTERNS, bpm_steps, drills};
@@ -68,14 +68,6 @@ fn ingredient_list(mask: u8) -> String {
 
 pub fn draw(g: &mut Game, p: &mut Paint, keys: &ButtonInput<KeyCode>, imgs: &MascotImages) {
     header(p, "Guitar Guru", true);
-    let calib = match g.cfg.latency_ms {
-        Some(l) => format!("Latency {l:+.0} ms"),
-        None => "Calibrate latency".into(),
-    };
-    if link(p, 1200.0, 56.0, &calib) {
-        g.start_level(calibration_level(), true);
-        return;
-    }
     if link(p, 1320.0, 56.0, "Setup") {
         g.refresh_lists();
         g.screen = Screen::Settings;
