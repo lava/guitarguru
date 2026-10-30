@@ -15,7 +15,9 @@
 //!                approaching pick) before the horizon have no sustain value
 //! - brightness = spectral centroid of the first 30 ms, octaves
 //! Different notes (frets, strings) sound different on their own, so each feature has
-//! the mean of its (group, note) removed when that note has at least 3 strokes.
+//! the mean of its (group, note) removed when that note has at least 3 strokes. Volume
+//! first has each pattern position's mean removed (positions with at least 3 strokes in
+//! the group), so deliberate accents on fixed positions don't count as inconsistency.
 //! Envelope match: per stroke, the RMS difference (dB) of its peak-normalised envelope to
 //! the group's median one, over the stroke's own window; the readout is the group mean.
 //!
@@ -55,6 +57,8 @@ pub struct StrokeIn {
     /// MIDI note (with string) of what was fretted, to compare like with like.
     pub midi: u8,
     pub string: u8,
+    /// Position in the run (flat pattern slot id): accents are judged per position.
+    pub position: usize,
 }
 
 /// One stroke's features (raw, before removing the note means).
@@ -63,6 +67,10 @@ pub struct StrokeTone {
     pub note: usize,
     pub group: usize,
     pub level_db: f64,
+    /// Mean level of this stroke's pattern position relative to the group's (an accent),
+    /// dB; 0 for positions with fewer than 3 strokes. Volume is judged on level minus this.
+    #[serde(default)]
+    pub accent_db: f64,
     pub attack_db: Option<f64>,
     pub sustain_db: Option<f64>,
     pub bright_oct: Option<f64>,
@@ -224,6 +232,7 @@ pub fn analyse(x: &[f32], sr: f64, strokes: &[StrokeIn], onsets: &[f64]) -> Tone
         let mut st: Vec<StrokeTone> = Vec::new();
         let mut wins = Vec::new();
         let mut notes = Vec::new();
+        let mut positions = Vec::new();
         for s in &members {
             let i = (s.onset * sr) as usize;
             if i >= x.len() {
@@ -242,10 +251,23 @@ pub fn analyse(x: &[f32], sr: f64, strokes: &[StrokeIn], onsets: &[f64]) -> Tone
             let bright = crate::score::centroids(x, sr, &[s.onset]).first().map(|c| c.log2());
             wins.push(gap_ms.min(avail).saturating_sub(SUSTAIN_MARGIN_MS - END_MARGIN_MS).min(win));
             notes.push(u16::from(s.midi) | (u16::from(s.string) << 8));
-            st.push(StrokeTone { note: s.note, group: gi, level_db: s.level_db, attack_db: attack, sustain_db: None, bright_oct: bright, match_db: None, env });
+            positions.push(s.position);
+            st.push(StrokeTone { note: s.note, group: gi, level_db: s.level_db, accent_db: 0.0, attack_db: attack, sustain_db: None, bright_oct: bright, match_db: None, env });
         }
         if st.len() < MIN_GROUP {
             continue;
+        }
+        // Accents: each position's mean level relative to the group's.
+        let gm = mean(&st.iter().map(|t| t.level_db).collect::<Vec<_>>());
+        let accents: Vec<f64> = positions
+            .iter()
+            .map(|p| {
+                let same: Vec<f64> = st.iter().zip(&positions).filter(|(_, q)| *q == p).map(|(t, _)| t.level_db).collect();
+                if same.len() >= 3 { mean(&same) - gm } else { 0.0 }
+            })
+            .collect();
+        for (t, a) in st.iter_mut().zip(accents) {
+            t.accent_db = a;
         }
         // Sustain at the group's horizon.
         let horizon = quantile(&wins, 0.2).clamp(ATTACK_MIN_MS, CAP_MS);
@@ -278,7 +300,7 @@ pub fn analyse(x: &[f32], sr: f64, strokes: &[StrokeIn], onsets: &[f64]) -> Tone
             }
         }
         let feat = |f: Feature, t: &StrokeTone| match f {
-            Feature::Level => Some(t.level_db),
+            Feature::Level => Some(t.level_db - t.accent_db),
             Feature::Attack => t.attack_db,
             Feature::Sustain => t.sustain_db,
             Feature::Brightness => t.bright_oct,
@@ -347,7 +369,7 @@ pub fn window_spreads(rep: &ToneReport, notes: &[usize]) -> [Option<f64>; 4] {
     let mut out = [None; 4];
     for f in Feature::ALL {
         let get = |t: &StrokeTone| match f {
-            Feature::Level => Some(t.level_db),
+            Feature::Level => Some(t.level_db - t.accent_db),
             Feature::Attack => t.attack_db,
             Feature::Sustain => t.sustain_db,
             Feature::Brightness => t.bright_oct,
@@ -400,7 +422,7 @@ mod tests {
             // Upstrokes: every other one choked (fast decay).
             let dec = if !down && i % 4 == 1 { 120.0 } else { 20.0 };
             hits.push((t, -20.0, dec));
-            strokes.push(StrokeIn { note: i, onset: t, level_db: -20.0, down, pm: false, midi: 40, string: 6 });
+            strokes.push(StrokeIn { note: i, onset: t, level_db: -20.0, down, pm: false, midi: 40, string: 6, position: i % 8 });
         }
         let x = synth(sr, 16.0, &hits);
         let onsets: Vec<f64> = hits.iter().map(|h| h.0).collect();
@@ -416,5 +438,36 @@ mod tests {
         // Too-small groups are skipped.
         let r = analyse(&x, sr, &strokes[..10], &onsets);
         assert!(r.groups.is_empty() && r.pct.is_none());
+    }
+
+    /// A deliberate accent on one pattern position doesn't count against volume; the same
+    /// level changes on no fixed position do.
+    #[test]
+    fn accents_on_fixed_positions_are_not_inconsistency() {
+        let sr = 48000.0;
+        let hits: Vec<(f64, f64, f64)> = (0..48).map(|i| (0.5 + f64::from(i) * 0.25, -20.0, 20.0)).collect();
+        let x = synth(sr, 13.0, &hits);
+        let onsets: Vec<f64> = hits.iter().map(|h| h.0).collect();
+        let strokes = |accent_at: &dyn Fn(usize) -> bool, positions: &dyn Fn(usize) -> usize| -> Vec<StrokeIn> {
+            (0..48)
+                .map(|i| StrokeIn {
+                    note: i,
+                    onset: onsets[i],
+                    level_db: if accent_at(i) { -14.0 } else { -20.0 },
+                    down: true,
+                    pm: false,
+                    midi: 40,
+                    string: 6,
+                    position: positions(i),
+                })
+                .collect()
+        };
+        let level_sd = |s: &[StrokeIn]| analyse(&x, sr, s, &onsets).groups[0].sd_of(Feature::Level).unwrap();
+        // Every bar's first note (of 8) accented.
+        let accented = level_sd(&strokes(&|i| i % 8 == 0, &|i| i % 8));
+        assert!(accented < 0.1, "{accented}");
+        // Accents on no fixed position (each position seen once).
+        let random = level_sd(&strokes(&|i| i % 8 == 0, &|i| i));
+        assert!(random > 1.5, "{random}");
     }
 }

@@ -361,7 +361,16 @@ pub fn score(inp: &ScoreInput) -> ScoreReport {
             .zip(&rep.notes)
             .enumerate()
             .filter_map(|(i, (g, n))| {
-                Some(StrokeIn { note: i, onset: n.onset_time?, level_db: n.level_db?, down: g.down, pm: g.pm, midi: g.midi, string: g.string })
+                Some(StrokeIn {
+                    note: i,
+                    onset: n.onset_time?,
+                    level_db: n.level_db?,
+                    down: g.down,
+                    pm: g.pm,
+                    midi: g.midi,
+                    string: g.string,
+                    position: g.slot,
+                })
             })
             .collect();
         let times: Vec<f64> = onsets.iter().map(|o| o.time).collect();
