@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::patterns::{BASE_BPM, BPM_MAX, BPM_MIN, BPM_STEP, Level, LevelKind, PATTERNS};
+use crate::patterns::{BASE_BPM, BPM_MAX, BPM_MIN, BPM_STEP, INGREDIENTS, LH, Level, LevelKind, PM, S16, first_ingredients};
 
 /// Combined score (percent) needed to pass a level.
 pub const PASS_THRESHOLD: f64 = 80.0;
@@ -22,14 +22,20 @@ pub fn data_dir() -> PathBuf {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Progress {
+    /// Legacy (tier model); migrated on load and then left empty.
+    #[serde(default)]
     pub unlocked: BTreeSet<String>,
-    /// Best combined score per level.
+    /// Best combined score per level key (`mix:<set>@bpm` runs, `pattern@bpm` drills).
+    #[serde(default)]
     pub best: BTreeMap<String, f64>,
     #[serde(default)]
     pub history: Vec<HistoryEntry>,
-    /// Levels unlocked but not yet played (shown with a dot).
+    /// Newly opened runs / ingredients not yet played (shown with a dot).
     #[serde(default)]
     pub fresh: BTreeSet<String>,
+    /// How many ingredients (in `INGREDIENTS` order) are unlocked.
+    #[serde(default)]
+    pub ingredients: usize,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -55,11 +61,25 @@ impl Progress {
     }
 }
 
+/// What opened up after a result.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Unlock {
+    Ingredient(usize),
+    Tempo(Level),
+}
+
+impl Unlock {
+    pub fn label(&self) -> String {
+        match self {
+            Unlock::Ingredient(i) => format!("+ {}", INGREDIENTS[*i].name),
+            Unlock::Tempo(l) => format!("{} {}", l.name(), l.bpm),
+        }
+    }
+}
+
 impl Progress {
     pub fn fresh() -> Self {
-        let mut p = Self::default();
-        p.unlocked.insert(Level::track(1, BASE_BPM).key());
-        p
+        Self::default()
     }
 
     pub fn path() -> PathBuf {
@@ -75,16 +95,50 @@ impl Progress {
         p
     }
 
-    /// Earlier versions unlocked single-pattern levels (`pattern@bpm`); those are drills
-    /// now, and an unlocked one opens its tier's track at that tempo.
+    /// Earlier versions had tier levels (`tierN@bpm`: 1 basic, 2 + palm mutes, 3 + 16ths,
+    /// 4 + note changes, cumulative). Their bests become run bests for that ingredient set,
+    /// and the highest tier unlocked anywhere unlocks the matching ingredients. Drill bests
+    /// (`pattern@bpm`) stay as they are; keys of removed patterns are dropped.
     fn migrate(&mut self) {
-        let old: Vec<Level> = self.unlocked.iter().filter_map(|k| Level::from_key(k)).filter(|l| !l.is_track()).collect();
-        for l in old {
-            self.unlocked.remove(&l.key());
-            self.unlocked.insert(Level::track(l.tier(), l.bpm).key());
+        let tier_mask = |t: u32| match t {
+            1 => Some(0),
+            2 => Some(PM),
+            3 => Some(PM | S16),
+            4 => Some(PM | S16 | LH),
+            _ => None,
+        };
+        let parse_tier = |k: &str| -> Option<(u32, u32)> {
+            let (a, b) = k.split_once('@')?;
+            Some((a.strip_prefix("tier")?.parse().ok()?, b.parse().ok()?))
+        };
+        let mut max_tier = 0;
+        for k in std::mem::take(&mut self.unlocked) {
+            if let Some((t, _)) = parse_tier(&k) {
+                max_tier = max_tier.max(t);
+            }
         }
-        self.fresh.retain(|k| k.starts_with("tier"));
-        self.unlocked.insert(Level::track(1, BASE_BPM).key());
+        let old: Vec<(String, f64)> = self.best.iter().map(|(k, v)| (k.clone(), *v)).collect();
+        for (k, v) in old {
+            if let Some((t, bpm)) = parse_tier(&k) {
+                self.best.remove(&k);
+                max_tier = max_tier.max(t);
+                if let Some(m) = tier_mask(t) {
+                    let e = self.best.entry(Level::run(m, bpm).key()).or_insert(v);
+                    *e = e.max(v);
+                }
+            } else if Level::from_key(&k).is_none() {
+                self.best.remove(&k);
+            }
+        }
+        for h in &mut self.history {
+            if let Some((t, bpm)) = parse_tier(&h.key)
+                && let Some(m) = tier_mask(t)
+            {
+                h.key = Level::run(m, bpm).key();
+            }
+        }
+        self.ingredients = self.ingredients.max((max_tier as usize).saturating_sub(1)).min(INGREDIENTS.len());
+        self.fresh.retain(|k| Level::from_key(k).is_some() || k.starts_with("ingredient:"));
     }
 
     pub fn save(&self) {
@@ -99,9 +153,38 @@ impl Progress {
         }
     }
 
-    /// Tracks are unlocked explicitly; a drill is open wherever its tier's track is.
+    /// Mask of the unlocked ingredients.
+    pub fn unlocked_mask(&self) -> u8 {
+        first_ingredients(self.ingredients)
+    }
+
+    pub fn ingredient_unlocked(&self, i: usize) -> bool {
+        i < self.ingredients
+    }
+
+    /// Passed runs, as (bpm, ingredient mask).
+    fn passed_runs(&self) -> impl Iterator<Item = (u32, u8)> + '_ {
+        self.best.iter().filter(|(_, v)| **v >= PASS_THRESHOLD).filter_map(|(k, _)| {
+            let l = Level::from_key(k)?;
+            match l.kind {
+                LevelKind::Run(m) => Some((l.bpm, m)),
+                LevelKind::Drill(_) => None,
+            }
+        })
+    }
+
+    /// (b, S) is open if every ingredient in S is unlocked and either b is the base tempo or
+    /// a passed run at b +/- 20 had a superset of S. Drills are open where the run with
+    /// their ingredients is.
     pub fn is_unlocked(&self, level: &Level) -> bool {
-        self.unlocked.contains(&Level::track(level.tier(), level.bpm).key())
+        let mask = level.mask();
+        if mask & !self.unlocked_mask() != 0 {
+            return false;
+        }
+        if level.bpm == BASE_BPM {
+            return true;
+        }
+        self.passed_runs().any(|(b, m)| (b + BPM_STEP == level.bpm || level.bpm + BPM_STEP == b) && m & mask == mask)
     }
 
     pub fn best(&self, level: &Level) -> Option<f64> {
@@ -112,74 +195,113 @@ impl Progress {
         self.best(level).is_some_and(|b| b >= PASS_THRESHOLD)
     }
 
-    /// Record a result. Returns the levels newly unlocked by it. Only tracks unlock:
-    /// the next tier's track at the same tempo and the same track at +/-20 BPM.
-    pub fn record(&mut self, level: &Level, combined: f64) -> Vec<Level> {
+    /// Record a result. Returns what it opened. Only runs unlock: tempos +/-20 for the run's
+    /// ingredient set (and its subsets), and the next ingredient when the run had all
+    /// unlocked ingredients active at >= 80 BPM.
+    pub fn record(&mut self, level: &Level, combined: f64) -> Vec<Unlock> {
+        let before: Vec<Level> = self.neighbour_runs(level).into_iter().filter(|l| self.is_unlocked(l)).collect();
         let best = self.best.entry(level.key()).or_insert(combined);
         if combined > *best {
             *best = combined;
         }
         self.fresh.remove(&level.key());
         let mut newly = Vec::new();
-        let LevelKind::Track(tier) = level.kind else { return newly };
-        if combined >= PASS_THRESHOLD {
-            let bpm = level.bpm;
-            let mut targets = Vec::new();
-            if tier < max_tier() {
-                targets.push(Level::track(tier + 1, bpm));
-            }
-            if bpm + BPM_STEP <= BPM_MAX {
-                targets.push(Level::track(tier, bpm + BPM_STEP));
-            }
-            if bpm >= BPM_MIN + BPM_STEP {
-                targets.push(Level::track(tier, bpm - BPM_STEP));
-            }
-            for t in targets {
-                if self.unlocked.insert(t.key()) {
-                    self.fresh.insert(t.key());
-                    newly.push(t);
-                }
+        let LevelKind::Run(mask) = level.kind else { return newly };
+        if combined < PASS_THRESHOLD {
+            return newly;
+        }
+        if mask == self.unlocked_mask() && level.bpm >= BASE_BPM && self.ingredients < INGREDIENTS.len() {
+            self.ingredients += 1;
+            self.fresh.insert(format!("ingredient:{}", INGREDIENTS[self.ingredients - 1].code));
+            newly.push(Unlock::Ingredient(self.ingredients - 1));
+        }
+        for l in self.neighbour_runs(level) {
+            if !before.contains(&l) && self.is_unlocked(&l) {
+                self.fresh.insert(l.key());
+                newly.push(Unlock::Tempo(l));
             }
         }
         newly
     }
-}
 
-pub fn max_tier() -> u32 {
-    PATTERNS.iter().map(|p| p.tier).max().unwrap_or(1)
+    /// The same ingredient set at +/-20 BPM.
+    fn neighbour_runs(&self, level: &Level) -> Vec<Level> {
+        let m = level.mask();
+        let mut v = Vec::new();
+        if level.bpm + BPM_STEP <= BPM_MAX {
+            v.push(Level::run(m, level.bpm + BPM_STEP));
+        }
+        if level.bpm >= BPM_MIN + BPM_STEP {
+            v.push(Level::run(m, level.bpm - BPM_STEP));
+        }
+        v
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::patterns::PATTERNS;
 
     #[test]
     fn unlock_rules() {
         let mut p = Progress::fresh();
-        assert!(p.is_unlocked(&Level::track(1, 80)));
-        assert!(p.is_unlocked(&Level::drill(0, 80)) && p.is_unlocked(&Level::drill(1, 80)));
-        assert!(!p.is_unlocked(&Level::track(2, 80)) && !p.is_unlocked(&Level::drill(3, 80)));
+        assert!(p.is_unlocked(&Level::run(0, 80)));
+        assert!(!p.is_unlocked(&Level::run(0, 100)));
+        assert!(!p.is_unlocked(&Level::run(PM, 80)), "palm mutes still locked");
+        let quarters = PATTERNS.iter().position(|q| q.id == "quarters").unwrap();
+        let pm_q = PATTERNS.iter().position(|q| q.id == "pm_quarters").unwrap();
+        assert!(p.is_unlocked(&Level::drill(quarters, 80)) && !p.is_unlocked(&Level::drill(pm_q, 80)));
         // Drills keep their own best but unlock nothing.
-        assert!(p.record(&Level::drill(0, 80), 95.0).is_empty());
-        assert_eq!(p.best(&Level::drill(0, 80)), Some(95.0));
-        assert!(p.record(&Level::track(1, 80), 50.0).is_empty());
-        let newly = p.record(&Level::track(1, 80), 85.0);
-        assert_eq!(newly, vec![Level::track(2, 80), Level::track(1, 100), Level::track(1, 60)]);
-        assert!(p.is_unlocked(&Level::drill(3, 80)), "tier-2 drills open with the tier-2 track");
-        assert!(!p.is_unlocked(&Level::track(2, 100)));
-        assert_eq!(p.best(&Level::track(1, 80)), Some(85.0));
-        let newly = p.record(&Level::track(1, 180), 90.0);
-        assert_eq!(newly, vec![Level::track(2, 180), Level::track(1, 160)]);
+        assert!(p.record(&Level::drill(quarters, 80), 95.0).is_empty());
+        assert!(p.record(&Level::run(0, 80), 50.0).is_empty());
+        // Passing basic at 80 (all unlocked ingredients = none) unlocks palm mutes and 60/100.
+        let newly = p.record(&Level::run(0, 80), 85.0);
+        assert_eq!(newly, vec![Unlock::Ingredient(0), Unlock::Tempo(Level::run(0, 100)), Unlock::Tempo(Level::run(0, 60))]);
+        assert!(p.is_unlocked(&Level::run(PM, 80)) && p.is_unlocked(&Level::drill(pm_q, 80)));
+        assert!(!p.is_unlocked(&Level::run(PM, 100)), "tempos open per ingredient set");
+        // A run without all unlocked ingredients does not unlock the next one.
+        let newly = p.record(&Level::run(0, 100), 90.0);
+        assert!(!newly.iter().any(|u| matches!(u, Unlock::Ingredient(_))), "{newly:?}");
+        assert_eq!(p.ingredients, 1);
+        // Below 80 BPM never unlocks ingredients.
+        p.record(&Level::run(0, 60), 90.0);
+        assert!(p.record(&Level::run(PM, 60), 0.0).is_empty());
+        assert!(!p.is_unlocked(&Level::run(PM, 60)), "60 not open for PM yet");
     }
 
     #[test]
-    fn migrates_old_pattern_levels() {
+    fn superset_runs_open_subset_tempos() {
+        let mut p = Progress { ingredients: 3, ..Default::default() };
+        p.record(&Level::run(PM | S16, 120), 85.0);
+        for m in [0, PM, S16, PM | S16] {
+            assert!(p.is_unlocked(&Level::run(m, 100)) && p.is_unlocked(&Level::run(m, 140)), "mask {m}");
+        }
+        assert!(!p.is_unlocked(&Level::run(LH, 140)), "LH was not part of the passed run");
+        assert!(!p.is_unlocked(&Level::run(PM | S16 | LH, 100)));
+        assert!(!p.is_unlocked(&Level::run(0, 160)), "only neighbours");
+        // An ingredient that is still locked keeps everything with it closed.
+        let p2 = Progress { ingredients: 1, best: p.best.clone(), ..Default::default() };
+        assert!(!p2.is_unlocked(&Level::run(S16, 100)));
+        assert!(p2.is_unlocked(&Level::run(PM, 100)));
+    }
+
+    #[test]
+    fn migrates_tier_progress() {
         let mut p = Progress::default();
-        p.unlocked.insert("gallop@120".into());
+        p.unlocked.insert("tier3@100".into());
+        p.unlocked.insert("tier6@80".into());
+        p.best.insert("tier1@80".into(), 88.0);
+        p.best.insert("tier2@80".into(), 70.0);
         p.best.insert("gallop@120".into(), 77.0);
+        p.best.insert("triplet_gallop@80".into(), 60.0);
         p.migrate();
-        assert!(p.is_unlocked(&Level::track(2, 120)));
-        assert!(p.is_unlocked(&Level::track(1, 80)));
-        assert_eq!(p.best(&Level::drill(3, 120)), Some(77.0));
+        assert_eq!(p.best(&Level::run(0, 80)), Some(88.0));
+        assert_eq!(p.best(&Level::run(PM, 80)), Some(70.0));
+        assert_eq!(p.best.get("gallop@120"), Some(&77.0));
+        assert!(!p.best.contains_key("triplet_gallop@80"));
+        assert!(p.unlocked.is_empty());
+        assert_eq!(p.ingredients, INGREDIENTS.len().min(5));
+        assert!(p.is_unlocked(&Level::run(0, 100)), "derived from the passed basic run at 80");
     }
 }

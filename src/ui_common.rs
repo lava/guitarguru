@@ -31,9 +31,6 @@ pub fn dim(c: Color, k: f32) -> Color {
     Color::srgb(b.red + (a.red - b.red) * k, b.green + (a.green - b.green) * k, b.blue + (a.blue - b.blue) * k)
 }
 
-pub fn roman(n: u32) -> &'static str {
-    ["0", "I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X"].get(n as usize).copied().unwrap_or("?")
-}
 
 /// Classify a deviation for colour coding.
 pub fn dev_color(dev_ms: f64) -> Color {

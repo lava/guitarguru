@@ -1,5 +1,5 @@
 //! Scripted runs for headless verification, driven by environment variables:
-//! `GG_AUTOPLAY=tier2@120` (track) or `GG_AUTOPLAY=gallop@120` (drill) starts that level, `GG_SHOTS=3,9.5` saves screenshots at those
+//! `GG_AUTOPLAY=mix:pm+16@120` (run) or `GG_AUTOPLAY=gallop@120` (drill) starts that level, `GG_SHOTS=3,9.5` saves screenshots at those
 //! seconds to `GG_SHOT_DIR` (default `.`), `GG_END_AT=8` ends the run early (scores the
 //! full bars played so far), `GG_LISTEN_AT=10` starts listen-back of the worst section,
 //! `GG_FAKE_OUTPUT=1` replaces only the output with a silent one, `GG_EXIT_AT=12` quits, `GG_SCREEN=settings` opens the settings screen.

@@ -65,7 +65,8 @@ pub fn draw(g: &mut Game, p: &mut Paint) {
     let pos16 = ((t - bar_t0) / s16) as f32;
     let cur = play.plan.pattern_at(bar_idx);
     p.text(80.0, 412.0, PATTERNS[cur].name, 15.0, col::DIM, Align::Left);
-    stroke_diagram(p, &PATTERNS[cur], 80.0, 440.0, 80.0, 56.0, if in_count_in { None } else { Some(pos16) }, true);
+    let (pm_on, tab) = (play.level.pm_on(), play.level.tab());
+    stroke_diagram(p, &PATTERNS[cur], 80.0, 430.0, 80.0, 64.0, if in_count_in { None } else { Some(pos16) }, true, pm_on, tab);
 
     // ---------- next pattern preview with countdown to the switch
     if !waiting {
@@ -81,7 +82,7 @@ pub fn draw(g: &mut Game, p: &mut Paint) {
                 let f = (remain / lead) as f32;
                 p.rect(x, 690.0, w, 6.0, col::PANEL);
                 p.rect(x + w * (1.0 - f), 690.0, w * f, 6.0, dim(col::BRASS, 0.8));
-                stroke_diagram(p, &PATTERNS[next], x, 704.0, 40.0, 30.0, None, false);
+                stroke_diagram(p, &PATTERNS[next], x, 704.0, 40.0, 40.0, None, false, pm_on, tab);
             }
         }
     }
@@ -94,11 +95,13 @@ fn mix(a: Color, b: Color, k: f32) -> Color {
     Color::srgb(a.red + (b.red - a.red) * k, a.green + (b.green - a.green) * k, a.blue + (b.blue - a.blue) * k)
 }
 
-/// One bar on the 16th grid: count labels, stroke arrows, duration bars and an optional
-/// playhead position (in sixteenths). Drawn at reduced contrast: it is secondary.
+/// One bar on the 16th grid: count labels, then either stroke arrows (played down, played
+/// up, small faint ghost strokes) with duration bars, or with `tab` a six-string tab with
+/// fret numbers and small pick arrows above. P.M. brackets mark palm-muted notes when
+/// `pm_on`. Optional playhead position in sixteenths. Drawn at reduced contrast.
 #[allow(clippy::too_many_arguments)]
-fn stroke_diagram(p: &mut Paint, pat: &Pattern, x0: f32, top: f32, cell: f32, arrow: f32, playhead: Option<f32>, labels: bool) {
-    let h = arrow + 34.0;
+fn stroke_diagram(p: &mut Paint, pat: &Pattern, x0: f32, top: f32, cell: f32, arrow: f32, playhead: Option<f32>, labels: bool, pm_on: bool, tab: bool) {
+    let h = if tab { arrow * 2.6 } else { arrow + 34.0 };
     if labels {
         for k in 0..16 {
             let x = x0 + k as f32 * cell;
@@ -111,21 +114,81 @@ fn stroke_diagram(p: &mut Paint, pat: &Pattern, x0: f32, top: f32, cell: f32, ar
             p.text(x + cell / 2.0, top, lbl, size, c, Align::Center);
         }
     }
-    let gtop = top + if labels { 20.0 } else { 0.0 };
+    let ltop = top + if labels { 20.0 } else { 0.0 };
+    // P.M. brackets above the notes.
+    let hits = pat.hits();
+    let pm_y = ltop + 6.0;
+    let gtop = ltop + 16.0;
+    if pm_on {
+        let mut i = 0;
+        while i < hits.len() {
+            if !hits[i].pm {
+                i += 1;
+                continue;
+            }
+            let start = hits[i].pos;
+            let mut j = i;
+            while j + 1 < hits.len() && hits[j + 1].pm {
+                j += 1;
+            }
+            let end = hits[j].pos + hits[j].len;
+            let (xa, xb) = (x0 + start as f32 * cell + 2.0, x0 + end as f32 * cell - 4.0);
+            let tsize = (cell * 0.18).clamp(9.0, 12.0);
+            p.text(xa, pm_y, "P.M.", tsize, col::DIM, Align::Left);
+            let mut x = xa + tsize * 2.6;
+            while x < xb {
+                p.rect(x, pm_y, 4.0_f32.min(xb - x), 1.0, col::DIM);
+                x += 8.0;
+            }
+            p.rect(xb, pm_y, 1.0, 6.0, col::DIM);
+            i = j + 1;
+        }
+    }
     for k in 0..=16 {
         p.rect(x0 + k as f32 * cell, gtop, 1.0, h, if k % 4 == 0 { col::LINE } else { col::PANEL });
     }
-    for bn in pat.bar() {
-        let x = x0 + bn.pos as f32 * cell;
-        let cx = x + cell / 2.0 * (bn.len as f32).min(1.0);
-        if bn.rest {
-            p.rect(cx - cell * 0.15, gtop + h * 0.45, cell * 0.3, 3.0, col::FAINT);
-            continue;
+    if tab {
+        // Six strings, high e on top; small pick arrows above.
+        let sp = (h - arrow * 0.5 - 8.0) / 6.0;
+        let s_top = gtop + arrow * 0.5 + 6.0;
+        let string_y = |s: u8| s_top + (f32::from(s) - 0.5) * sp;
+        for s in 1..=6u8 {
+            p.rect(x0, string_y(s), 16.0 * cell, 1.0, col::LINE);
         }
-        let active = playhead.is_some_and(|ph| ph >= bn.pos as f32 && ph < (bn.pos + bn.len) as f32);
-        let c = if active { dim(col::BRASS, 0.8) } else { dim(col::TEXT, 0.55) };
-        p.stroke_arrow(cx, gtop + 8.0 + arrow / 2.0, arrow, bn.downstroke(), c);
-        p.rect(x + 4.0, gtop + arrow + 18.0, bn.len as f32 * cell - 8.0, 3.0, if active { dim(col::BRASS, 0.8) } else { col::LINE });
+        let fr = pat.frettings();
+        for (n, f) in hits.iter().zip(&fr) {
+            let cx = x0 + n.pos as f32 * cell + cell / 2.0;
+            let active = playhead.is_some_and(|ph| ph >= n.pos as f32 && ph < (n.pos + n.len) as f32);
+            let c = if active { dim(col::BRASS, 0.85) } else { dim(col::TEXT, 0.65) };
+            p.stroke_arrow(cx, gtop + arrow * 0.25, arrow * 0.4, n.downstroke(), c);
+            let size = (sp * 1.1).clamp(9.0, 16.0);
+            let mut put = |s: u8, fret: u8| {
+                let y = string_y(s);
+                p.rect(cx - size * 0.45, y - size * 0.5, size * 0.9 * if fret >= 10 { 1.6 } else { 1.0 }, size, col::BG);
+                p.text(cx, y, format!("{fret}"), size, c, Align::Center);
+            };
+            put(f.string, f.fret);
+            if f.power {
+                put(f.string - 1, f.fret + 2);
+            }
+        }
+    } else {
+        // Played notes: arrow at the onset plus a duration bar; ghost strokes (the hand
+        // moves but misses the strings on purpose): small faint arrows.
+        for st in pat.strokes() {
+            let x = x0 + st.pos as f32 * cell;
+            let cx = x + cell / 2.0;
+            if !st.played {
+                p.stroke_arrow(cx, gtop + 8.0 + arrow / 2.0, arrow * 0.42, st.down, col::LINE);
+                continue;
+            }
+            let len = hits.iter().find(|h| (h.pos - st.pos).abs() < 1e-6).map_or(1.0, |h| h.len) as f32;
+            let active = playhead.is_some_and(|ph| ph >= st.pos as f32 && ph < st.pos as f32 + len);
+            let base = if st.down { col::TEXT } else { col::DIM };
+            let c = if active { dim(col::BRASS, 0.8) } else { dim(base, 0.6) };
+            p.stroke_arrow(cx, gtop + 8.0 + arrow / 2.0, arrow, st.down, c);
+            p.rect(x + 4.0, gtop + arrow + 18.0, len * cell - 8.0, 3.0, if active { dim(col::BRASS, 0.8) } else { col::LINE });
+        }
     }
     if let Some(ph) = playhead {
         let px = x0 + ph.clamp(0.0, 16.0) * cell;

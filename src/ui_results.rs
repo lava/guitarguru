@@ -3,7 +3,7 @@
 
 use crate::game::{Game, ResultsState, Screen};
 use crate::paint::{Align, Paint, col};
-use crate::patterns::{BPM_MAX, BPM_STEP, Level, LevelKind, PATTERNS, bar_seconds, sixteenth_seconds};
+use crate::patterns::{BPM_MAX, BPM_STEP, Level, PATTERNS, bar_seconds, sixteenth_seconds};
 use crate::progress::PASS_THRESHOLD;
 use crate::score::ScoreReport;
 use crate::session::Window;
@@ -36,7 +36,7 @@ pub fn draw(g: &mut Game, p: &mut Paint) {
     let pass = rep.combined_pct >= PASS_THRESHOLD;
     p.text(cx, cy - 10.0, format!("{:.0}", rep.combined_pct), 60.0, if pass { col::BRASS } else { col::TEXT }, Align::Center);
     p.text(cx, cy + 34.0, if pass { "PASSED".to_string() } else { format!("pass at {PASS_THRESHOLD:.0}") }, 15.0, col::DIM, Align::Center);
-    p.text(cx, 284.0, format!("{} - {} BPM", r.run.level.name(), r.run.plan.bpm), 14.0, col::DIM, Align::Center);
+    p.text(cx, 284.0, crate::paint::fit(&format!("{} - {} BPM", r.run.level.name(), r.run.plan.bpm), 280.0, 14.0), 14.0, col::DIM, Align::Center);
 
     // ---------- timing & tone bars
     p.panel(330.0, 16.0, 430.0, 290.0);
@@ -62,7 +62,7 @@ pub fn draw(g: &mut Game, p: &mut Paint) {
         "tone  (40 %)",
         rep.tone_pct,
         col::TONE,
-        format!("attack sd {:.1} dB -> {:.0} %   PM brightness sd {cen}", rep.level_std_detrended_db, rep.level_pct),
+        format!("attack sd {:.1} dB -> {:.0} %   brightness sd {cen}", rep.level_std_detrended_db, rep.level_pct),
     );
     // unlock chips
     p.label(350.0, 196.0, "unlocked");
@@ -71,7 +71,7 @@ pub fn draw(g: &mut Game, p: &mut Paint) {
         p.text(350.0, 222.0, if pass { "nothing new" } else { "score 80 to unlock" }, 14.0, col::FAINT, Align::Left);
     }
     for k in &r.newly {
-        let label = format!("{} {}", k.name().replace(" track", ""), k.bpm);
+        let label = k.label();
         let w = 12.0 + label.len() as f32 * 8.0;
         if x + w > 750.0 {
             break;
@@ -121,7 +121,7 @@ pub fn draw(g: &mut Game, p: &mut Paint) {
         action = Action::Retry;
     }
     if let Some(l) = next_level(g, r) {
-        let label = format!("Next: {} {}", truncate(&l.name().replace(" track", ""), 11), l.bpm);
+        let label = format!("Next: {} BPM", l.bpm);
         if p.button(1194.0, 78.0, 226.0, 44.0, &label, false) {
             action = Action::Start(l);
         }
@@ -192,14 +192,8 @@ enum Action {
 }
 
 fn next_level(g: &Game, r: &ResultsState) -> Option<Level> {
+    // The same combination 20 BPM faster, if open.
     let l = r.run.level;
-    // Prefer the next tier's track at this tempo, then the same level 20 BPM faster.
-    if let LevelKind::Track(t) = l.kind {
-        let n = Level::track(t + 1, l.bpm);
-        if t < crate::progress::max_tier() && g.progress.is_unlocked(&n) {
-            return Some(n);
-        }
-    }
     let faster = Level { kind: l.kind, bpm: l.bpm + BPM_STEP };
     (faster.bpm <= BPM_MAX && g.progress.is_unlocked(&faster)).then_some(faster)
 }
@@ -251,7 +245,7 @@ fn weak_card(p: &mut Paint, r: &ResultsState, i: usize, w: &Window, x: f32, y: f
     }
     // playback progress
     let prog = playing.map(|(pos, len)| pos as f64 / len.max(1) as f64);
-    p.text(x + 110.0, y + 50.0, PATTERNS[w.pattern].name, 14.0, col::TEXT, Align::Left);
+    p.text(x + 110.0, y + 50.0, crate::paint::fit(PATTERNS[w.pattern].name, cw - 270.0, 14.0), 14.0, col::TEXT, Align::Left);
     pattern_glyph(p, x + cw - 136.0, y + 44.0, 120.0, 10.0, &PATTERNS[w.pattern], col::DIM);
     p.rect(x + 110.0, y + 66.0, cw - 126.0, 4.0, col::LINE);
     if let Some(f) = prog {
@@ -464,9 +458,24 @@ fn tone_panel(p: &mut Paint, r: &ResultsState, x: f32, y: f32, w: f32, h: f32) {
     p.disc(pos(rep.level_std_detrended_db), sy + 5.0, 7.0, col::TONE);
     p.text(sx, sy + 44.0, format!("attack sd {:.1} dB", rep.level_std_detrended_db), 20.0, col::TONE, Align::Left);
     p.text(sx + 220.0, sy + 44.0, format!("raw {:.1} dB, median {:.0} dBFS", rep.level_std_db, rep.level_median_db), 12.0, col::DIM, Align::Left);
+    // Per group, as marked by the patterns (no P.M. detection): count-weighted into the score.
+    let grp = |g: &crate::score::ToneGroup| {
+        if g.n == 0 {
+            "-".to_string()
+        } else {
+            format!(
+                "{} notes  {:.1} dB  {}",
+                g.n,
+                g.level_std_db,
+                g.centroid_std_oct.map_or("-".into(), |c| format!("{c:.2} oct")),
+            )
+        }
+    };
+    p.text(sx, sy + 66.0, format!("P.M.  {}", grp(&rep.pm)), 12.0, col::TONE, Align::Left);
+    p.text(sx, sy + 82.0, format!("open  {}", grp(&rep.open)), 12.0, col::TONE, Align::Left);
 
     // attack level per bar relative to the median, +/-1 dB band
-    let (bx, by, bw, bh) = (x + 16.0, y + 140.0, w - 32.0, 80.0);
+    let (bx, by, bw, bh) = (x + 16.0, y + 172.0, w - 32.0, 62.0);
     p.label(bx, by - 14.0, "attack per bar vs median (+/-1 dB band)");
     p.rect(bx, by, bw, bh, col::BG);
     let ys = |db: f64| by + bh / 2.0 - (db.clamp(-4.0, 4.0) / 4.0) as f32 * bh / 2.0;
@@ -490,8 +499,8 @@ fn tone_panel(p: &mut Paint, r: &ResultsState, x: f32, y: f32, w: f32, h: f32) {
         p.rect(bx + b as f32 * colw, top, (colw - 1.0).max(1.0), hgt.max(1.0), col::TONE);
     }
     // palm-mute brightness (centroid per bar)
-    let (cx, cy, cw, chh) = (x + 16.0, y + 250.0, w - 32.0, 70.0);
-    p.label(cx, cy - 14.0, "palm-mute brightness (centroid per bar)");
+    let (cx, cy, cw, chh) = (x + 16.0, y + 268.0, w - 32.0, 56.0);
+    p.label(cx, cy - 14.0, "attack brightness per bar (centroid)");
     p.rect(cx, cy, cw, chh, col::BG);
     let per_bar: Vec<f64> = (0..nb)
         .filter_map(|b| {

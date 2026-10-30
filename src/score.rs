@@ -7,6 +7,9 @@
 //! - level score   = (4 dB - level std) / 3 dB                   (1 dB -> 100 %, 4 dB -> 0 %)
 //!   (level std after removing each slot's mean level, so intentional accents don't count)
 //! - centroid score= (0.5 oct - centroid std) / 0.4 oct          (0.1 oct -> 100 %, 0.5 -> 0 %)
+//! Tone spreads are computed separately within the notes the pattern marks palm-muted and
+//! within the open notes, then averaged weighted by note count (no P.M. detection, no
+//! penalty for "wrong" muting).
 //! - tone %        = 0.75 * level score + 0.25 * centroid score
 //! - combined %    = 0.6 * timing % + 0.4 * tone %
 
@@ -29,6 +32,9 @@ pub struct NoteResult {
     /// Deviation after latency compensation, ms (positive = late).
     pub dev_ms: Option<f64>,
     pub level_db: Option<f64>,
+    /// The note is marked palm-muted.
+    #[serde(default)]
+    pub pm: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -66,7 +72,11 @@ pub struct ScoreReport {
     pub level_median_db: f64,
     pub level_std_db: f64,
     pub level_std_detrended_db: f64,
+    /// Attack-brightness spread (octaves), count-weighted over the P.M. and open groups.
     pub centroid_std_oct: Option<f64>,
+    /// Per group (palm-muted / open as marked by the pattern).
+    pub pm: ToneGroup,
+    pub open: ToneGroup,
     pub hit_factor: f64,
     pub spread_pct: f64,
     pub timing_pct: f64,
@@ -77,10 +87,21 @@ pub struct ScoreReport {
     pub notes: Vec<NoteResult>,
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ToneGroup {
+    pub n: usize,
+    /// Attack-level spread after removing each slot's mean (dB).
+    pub level_std_db: f64,
+    pub centroid_std_oct: Option<f64>,
+    pub centroid_median_hz: Option<f64>,
+}
+
 pub struct GridIn {
     /// Grid time in the recording's timeline (seconds), already including any known latency.
     pub time: f64,
     pub slot: usize,
+    /// Marked palm-muted in the pattern.
+    pub pm: bool,
 }
 
 pub struct ScoreInput<'a> {
@@ -176,7 +197,7 @@ pub fn score(inp: &ScoreInput) -> ScoreReport {
             }
             None => (None, None, None),
         };
-        rep.notes.push(NoteResult { grid_time: g.time, slot: g.slot, onset_time, dev_ms, level_db });
+        rep.notes.push(NoteResult { grid_time: g.time, slot: g.slot, onset_time, dev_ms, level_db, pm: g.pm });
     }
     rep.n_matched = devs.len();
     rep.n_missed = grid.len() - devs.len();
@@ -243,14 +264,53 @@ pub fn score(inp: &ScoreInput) -> ScoreReport {
     rep.level_std_db = std(&levels);
     let slot_lvl_mean: Vec<f64> = slot_levels.iter().map(|v| mean(v)).collect();
     let lvl_resid: Vec<f64> = levels.iter().zip(&slots_of).map(|(l, s)| l - slot_lvl_mean[*s % n_slots]).collect();
-    rep.level_std_detrended_db = std(&lvl_resid);
-    if let Some((x, sr)) = inp.audio {
-        let times: Vec<f64> = rep.notes.iter().filter_map(|n| n.onset_time).collect();
-        let c: Vec<f64> = centroids(x, sr, &times).into_iter().map(f64::log2).collect();
-        if c.len() >= 4 {
-            rep.centroid_std_oct = Some(std(&c));
+    let matched_pm: Vec<bool> = rep.notes.iter().filter(|n| n.onset_time.is_some()).map(|n| n.pm).collect();
+    // Attack brightness per matched note (log2 Hz), minus its slot's mean: a slot has a
+    // fixed string, fret and P.M. marking in its pattern, so this also removes the
+    // brightness differences between strings and notes.
+    let bright: Vec<Option<f64>> = match inp.audio {
+        Some((x, sr)) => {
+            let times: Vec<f64> = rep.notes.iter().filter_map(|n| n.onset_time).collect();
+            times.iter().map(|t| centroids(x, sr, &[*t]).first().map(|c| c.log2())).collect()
+        }
+        None => vec![None; levels.len()],
+    };
+    let mut slot_b = vec![Vec::new(); n_slots];
+    for (b, s) in bright.iter().zip(&slots_of) {
+        if let Some(b) = b {
+            slot_b[*s % n_slots].push(*b);
         }
     }
+    let slot_b_mean: Vec<f64> = slot_b.iter().map(|v| mean(v)).collect();
+    for pm in [true, false] {
+        let resid: Vec<f64> = lvl_resid.iter().zip(&matched_pm).filter(|(_, p)| **p == pm).map(|(r, _)| *r).collect();
+        let b_resid: Vec<f64> = bright
+            .iter()
+            .zip(&slots_of)
+            .zip(&matched_pm)
+            .filter(|(_, p)| **p == pm)
+            .filter_map(|((b, s), _)| b.map(|b| b - slot_b_mean[*s % n_slots]))
+            .collect();
+        let raw_hz: Vec<f64> = bright.iter().zip(&matched_pm).filter(|(_, p)| **p == pm).filter_map(|(b, _)| b.map(f64::exp2)).collect();
+        let g = ToneGroup {
+            n: resid.len(),
+            level_std_db: std(&resid),
+            centroid_std_oct: (b_resid.len() >= 4).then(|| std(&b_resid)),
+            centroid_median_hz: median(&raw_hz),
+        };
+        if pm {
+            rep.pm = g;
+        } else {
+            rep.open = g;
+        }
+    }
+    let (np, no) = (rep.pm.n as f64, rep.open.n as f64);
+    let wsum = (np + no).max(1.0);
+    rep.level_std_detrended_db = (np * rep.pm.level_std_db + no * rep.open.level_std_db) / wsum;
+    rep.centroid_std_oct = match (rep.pm.centroid_std_oct, rep.open.centroid_std_oct) {
+        (Some(a), Some(b)) => Some((np * a + no * b) / wsum),
+        (a, b) => a.or(b),
+    };
 
     let enough = devs.len() >= 4;
     rep.hit_factor = if grid.is_empty() { 0.0 } else { (devs.len() as f64 - 0.5 * rep.n_extra as f64).max(0.0) / grid.len() as f64 };
@@ -311,7 +371,7 @@ mod tests {
     use crate::detect::{DetectParams, detect};
 
     fn grid_for(n: usize, start: f64, s16: f64, step: usize) -> Vec<GridIn> {
-        (0..n).map(|i| GridIn { time: start + (i * step) as f64 * s16, slot: i % (16 / step) }).collect()
+        (0..n).map(|i| GridIn { time: start + (i * step) as f64 * s16, slot: i % (16 / step), pm: true }).collect()
     }
 
     fn onsets_from(grid: &[GridIn], f: impl Fn(usize) -> Option<(f64, f64)>) -> Vec<Onset> {
@@ -383,7 +443,7 @@ mod tests {
         let mut g = Vec::new();
         for bar in 0..12 {
             for (slot, p) in pos.iter().enumerate() {
-                g.push(GridIn { time: 0.5 + (bar as f64 * 16.0 + p) * s16, slot });
+                g.push(GridIn { time: 0.5 + (bar as f64 * 16.0 + p) * s16, slot, pm: true });
             }
         }
         let mut rng = Rng::new(42);

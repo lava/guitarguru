@@ -59,7 +59,7 @@ pub struct ResultsState {
     #[allow(dead_code)]
     pub onsets: Vec<Onset>,
     pub worst: Vec<Window>,
-    pub newly: Vec<Level>,
+    pub newly: Vec<crate::progress::Unlock>,
     pub saved: Result<std::path::PathBuf, String>,
     pub prev_best: Option<HistoryEntry>,
     pub listening: Option<usize>,
@@ -90,6 +90,8 @@ pub struct Game {
     pub meter_peak_db: f32,
     pub meter_hold: f32,
     pub selected: Level,
+    /// Ingredient toggles on the main screen (bit mask).
+    pub mix: u8,
     pub play: Option<PlayState>,
     pub results: Option<ResultsState>,
     pub lists: SettingsLists,
@@ -110,7 +112,8 @@ impl Game {
             meter_db: -90.0,
             meter_peak_db: -90.0,
             meter_hold: 0.0,
-            selected: Level::track(1, crate::patterns::BASE_BPM),
+            selected: Level::run(0, crate::patterns::BASE_BPM),
+            mix: 0,
             play: None,
             results: None,
             lists: SettingsLists::default(),

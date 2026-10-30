@@ -74,7 +74,7 @@ impl RunData {
         let table = self.slot_table();
         let flat = |p: usize, s: usize| table.iter().position(|&e| e == (p, s)).unwrap_or(0);
         let grid: Vec<GridIn> =
-            self.plan.notes.iter().map(|n| GridIn { time: n.time + self.grid_offset_s, slot: flat(n.pattern, n.slot) }).collect();
+            self.plan.notes.iter().map(|n| GridIn { time: n.time + self.grid_offset_s, slot: flat(n.pattern, n.slot), pm: n.pm }).collect();
         let min_len = self
             .patterns_used()
             .iter()
@@ -132,8 +132,12 @@ impl RunData {
         let mut cands = Vec::new();
         let mut start = 0;
         while start + wb <= self.plan.scored_bars {
+            // Windows stay within one segment (one pattern in a run; a multi-bar riff in a drill).
             let pat = self.plan.bar_patterns[start as usize];
-            if (start..start + wb).any(|b| self.plan.bar_patterns[b as usize] != pat) {
+            let seg = start / crate::patterns::SEGMENT_BARS;
+            let same_seg = (start..start + wb).all(|b| b / crate::patterns::SEGMENT_BARS == seg);
+            let same_pat = (start..start + wb).all(|b| self.plan.bar_patterns[b as usize] == pat);
+            if !(same_pat || (!self.level.is_run() && same_seg)) {
                 start += 1;
                 continue;
             }
@@ -332,7 +336,7 @@ mod tests {
 
     #[test]
     fn track_run_has_per_pattern_slots_and_clean_windows() {
-        let level = Level::track(2, 160);
+        let level = Level::run(crate::patterns::PM | crate::patterns::S16, 160);
         let plan = SessionPlan::new(&level, 1, 40.0);
         let mut rng = Rng::new(3);
         let hits: Vec<(f64, f64)> = plan.notes.iter().map(|n| (n.time + 0.2 + 0.01 + 0.004 * rng.gauss(), -18.0)).collect();
@@ -343,8 +347,10 @@ mod tests {
         assert_eq!(rep.slots.len(), run.slot_table().len());
         assert!(rep.slots.iter().all(|s| !s.pattern.is_empty()));
         assert!(rep.n_missed <= 2, "{}", rep.n_missed);
+        assert_eq!(rep.pm.n + rep.open.n, rep.n_matched);
+        assert!(rep.open.n > 0, "quarters segment is open");
         for w in run.worst_windows(&rep, &onsets, 3) {
-            assert!(w.notes.iter().all(|&i| run.plan.notes[i].pattern == w.pattern));
+            assert!(w.notes.iter().all(|&i| run.plan.notes[i].pattern == w.pattern), "runs: one pattern per window");
         }
     }
 }
