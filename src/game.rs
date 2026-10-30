@@ -396,8 +396,10 @@ impl Game {
     pub fn listen(&mut self, i: usize) {
         let (Some(engine), Some(r)) = (&self.engine, &mut self.results) else { return };
         let Some(w) = r.worst.get(i) else { return };
-        let gain = 10f32.powf(self.cfg.audio.click_volume_db / 20.0);
-        let audio = r.run.render_listen(w, &self.cfg.tone, gain);
+        // Replay: raw DI a bit quieter, click 4 dB louder than live, so the timing relation
+        // is clearly audible.
+        let gain = 10f32.powf((self.cfg.audio.click_volume_db + 4.0) / 20.0);
+        let audio = r.run.render_listen(w, gain, r.rep.level_median_db);
         engine.play(audio);
         r.listening = Some(i);
     }

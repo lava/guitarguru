@@ -53,7 +53,10 @@ pub fn draw(g: &mut Game, p: &mut Paint) {
         "timing  (60 %)",
         rep.timing_pct,
         col::BRASS,
-        format!("sd {:.1} ms -> {:.0} %   x hits {:.2}   ({} missed, {} extra)", rep.spread_ms, rep.spread_pct, rep.hit_factor, rep.n_missed, rep.n_extra),
+        format!(
+            "evenness {:.1} ms -> {:.0} %  drift {:.0} ms -> {:.0} %  hits x{:.2} ({} missed)",
+            rep.spread_ms, rep.spread_pct, rep.drift_rms_ms, rep.drift_pct, rep.hit_factor, rep.n_missed
+        ),
     );
     let cen = rep.centroid_std_oct.map_or("-".into(), |c| format!("{c:.2} oct"));
     bar(
@@ -337,16 +340,12 @@ fn timing_panel(p: &mut Paint, r: &ResultsState, x: f32, y: f32, w: f32, h: f32)
     if let Some(b) = &r.prev_best {
         p.rect(pos(b.spread_ms) - 1.0, sy - 6.0, 2.0, 22.0, col::DIM);
     }
-    p.text(sx, sy + 44.0, format!("sd {:.1} ms", rep.spread_ms), 20.0, col::TEXT, Align::Left);
-    let off = rep.mean_offset_ms.map_or("offset: calibrate".to_string(), |o| {
-        format!("{} {:+.1} ms", if o < 0.0 { "rushing" } else { "dragging" }, o)
-    });
-    let oc = rep.mean_offset_ms.map_or(col::DIM, dev_color);
-    p.text(sx + 140.0, sy + 44.0, off, 15.0, oc, Align::Left);
+    p.text(sx, sy + 44.0, format!("evenness {:.1} ms", rep.spread_ms), 20.0, col::TEXT, Align::Left);
+    p.text(sx + 190.0, sy + 44.0, format!("IOI sd {:.1} ms", rep.ioi_sd_ms), 13.0, col::DIM, Align::Left);
     p.text(
         sx,
         sy + 70.0,
-        format!("slot {:.1}  jitter {:.1}  wander {:.0} ms (not scored)", rep.slot_pattern_std_ms, rep.jitter_std_ms, rep.wander_ms),
+        format!("latency + feel {:+.0} ms (info)   drift {:.0} ms rms", rep.latency_ms, rep.drift_rms_ms),
         13.0,
         col::DIM,
         Align::Left,

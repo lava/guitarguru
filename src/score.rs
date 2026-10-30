@@ -1,20 +1,21 @@
 //! Matching detected onsets to the note grid and turning the result into scores.
 //!
 //! Formulas (all percentages clamped to 0..100):
-//! - spread score  = (35 ms - std) / 30 ms                       (5 ms -> 100 %, 35 ms -> 0 %)
+//! - global offset = median(onset - grid) over matched notes ("your latency + feel")
+//! - uniformity    = sd(IOI error) / sqrt(2), IOI error = actual - expected interval of
+//!                   consecutive matched attacks (lag-independent)
+//! - uniformity %  = (40 ms - uniformity) / 30 ms                (10 ms -> 100 %, 40 ms -> 0 %)
+//! - drift         = RMS of the 11-note moving average of (onset - grid - global offset)
+//! - drift %       = (100 ms - drift) / 85 ms                    (15 ms -> 100 %, 100 ms -> 0 %)
 //! - hit factor    = max(0, matched - min(0.5 * extra, grid / 4)) / grid notes
-//! Deviations are measured against a local offset track (sliding median over +/-4 s), so
-//! slow wander of output latency or tempo is reported separately (`wander_ms`) and the
-//! spread is note-to-note timing.
-//! - timing %      = spread score * hit factor
-//! - level score   = (4 dB - level std) / 3 dB                   (1 dB -> 100 %, 4 dB -> 0 %)
-//!   (level std after removing each slot's mean level, so intentional accents don't count)
-//! - centroid score= (0.5 oct - centroid std) / 0.4 oct          (0.1 oct -> 100 %, 0.5 -> 0 %)
-//! Tone spreads are computed separately within the notes the pattern marks palm-muted and
-//! within the open notes, then averaged weighted by note count (no P.M. detection, no
-//! penalty for "wrong" muting).
+//! - timing %      = (0.75 * uniformity % + 0.25 * drift %) * hit factor
+//! - level score   = per group, count-weighted: palm-muted (4 dB - sd) / 3 dB, open
+//!                   (7 dB - sd) / 5 dB; sd after removing each slot's mean level
+//! - centroid score= (0.5 oct - brightness sd) / 0.4 oct, count-weighted over the groups
 //! - tone %        = 0.75 * level score + 0.25 * centroid score
-//! - combined %    = 0.6 * timing % + 0.4 * tone %
+//! - combined %    = 0.6 * timing % + 0.4 * tone %;  pass at 60
+//! Onsets are assigned to notes against a local offset track (sliding median over +/-4 s)
+//! so matching survives a wandering player; all scores use the global offset.
 
 use serde::{Deserialize, Serialize};
 
@@ -70,14 +71,23 @@ pub struct ScoreReport {
     pub calibrated: bool,
     /// Rushing (<0) / dragging (>0) relative to the calibrated latency, if any.
     pub mean_offset_ms: Option<f64>,
-    /// Timing spread around the local offset track (what the score uses), ms.
+    /// Note-to-note uniformity: sd of the inter-onset-interval errors / sqrt(2), ms
+    /// (onset-equivalent; the headline timing number).
     pub spread_ms: f64,
-    /// Spread around one constant offset (includes slow wander), ms.
+    /// Spread around the global offset (includes slow drift), ms.
     #[serde(default)]
     pub spread_total_ms: f64,
-    /// Spread of the local offset track itself: slow wander of latency/tempo, ms.
+    /// Spread of the local matching track (informational), ms.
     #[serde(default)]
     pub wander_ms: f64,
+    /// Spread of the intervals between consecutive attacks vs. expected, ms.
+    #[serde(default)]
+    pub ioi_sd_ms: f64,
+    /// RMS of the slow component (11-note average) of deviations from the global offset, ms.
+    #[serde(default)]
+    pub drift_rms_ms: f64,
+    #[serde(default)]
+    pub drift_pct: f64,
     pub slot_pattern_std_ms: f64,
     pub drift_std_ms: f64,
     pub jitter_std_ms: f64,
@@ -236,10 +246,11 @@ pub fn score(inp: &ScoreInput) -> ScoreReport {
         let (onset_time, dev_ms, level_db) = match m {
             Some(j) => {
                 let o = onsets[*j];
-                // Scored deviation: relative to the local offset track (slow wander removed).
-                let d = (o.time - g.time - tr) * 1e3;
+                // Deviation from the single global offset (the reference); the local track
+                // only decided which onset belongs to which note.
+                let d = (o.time - g.time - offset) * 1e3;
                 devs.push(d);
-                total_devs.push((o.time - g.time - offset) * 1e3);
+                total_devs.push(d);
                 track_ms.push((tr - offset) * 1e3);
                 raw_devs.push((o.time - g.time) * 1e3);
                 levels.push(o.level_db);
@@ -272,9 +283,21 @@ pub fn score(inp: &ScoreInput) -> ScoreReport {
         }
     }
 
-    rep.spread_ms = std(&devs);
+    // Main, lag-independent criterion: uniformity of the intervals between consecutive
+    // matched attacks. IOI error = actual interval - expected interval; across misses the
+    // next matched note is used with its (multi-note) expected interval. For independent
+    // per-note jitter, sd(IOI error) = sqrt(2) * sd(onset), so divide by sqrt(2) to keep
+    // the onset-based 10..40 ms scale.
+    let ioi_err: Vec<f64> = devs.windows(2).map(|w| w[1] - w[0]).collect();
+    rep.ioi_sd_ms = std(&ioi_err);
+    rep.spread_ms = rep.ioi_sd_ms / std::f64::consts::SQRT_2;
     rep.spread_total_ms = std(&total_devs);
     rep.wander_ms = std(&track_ms);
+    // Long-term drift against the global offset: RMS of the slow component (11-note
+    // moving average) of onset - grid - global offset.
+    let half = DRIFT_WINDOW / 2;
+    let slow: Vec<f64> = (0..devs.len()).map(|i| mean(&devs[i.saturating_sub(half)..(i + half + 1).min(devs.len())])).collect();
+    rep.drift_rms_ms = if slow.is_empty() { 0.0 } else { (slow.iter().map(|v| v * v).sum::<f64>() / slow.len() as f64).sqrt() };
     rep.mean_offset_ms = inp.calibrated.then(|| mean(&raw_devs));
 
     // Decomposition: per-slot pattern, slow drift, note-to-note jitter.
@@ -304,7 +327,6 @@ pub fn score(inp: &ScoreInput) -> ScoreReport {
     let slot_mean: Vec<f64> = rep.slots.iter().map(|s| s.mean_ms).collect();
     let pattern_part: Vec<f64> = slots_of.iter().map(|s| slot_mean[*s % n_slots]).collect();
     let resid: Vec<f64> = devs.iter().zip(&pattern_part).map(|(d, p)| d - p).collect();
-    let half = DRIFT_WINDOW / 2;
     let drift: Vec<f64> = (0..resid.len())
         .map(|i| mean(&resid[i.saturating_sub(half)..(i + half + 1).min(resid.len())]))
         .collect();
@@ -370,9 +392,15 @@ pub fn score(inp: &ScoreInput) -> ScoreReport {
     // detector problem can't zero the score on its own.
     let extra_pen = (0.5 * rep.n_extra as f64).min(grid.len() as f64 / 4.0);
     rep.hit_factor = if grid.is_empty() { 0.0 } else { (devs.len() as f64 - extra_pen).max(0.0) / grid.len() as f64 };
-    rep.spread_pct = if enough { pct((35.0 - rep.spread_ms) / 30.0) } else { 0.0 };
-    rep.timing_pct = rep.spread_pct * rep.hit_factor;
-    rep.level_pct = if enough { pct((4.0 - rep.level_std_detrended_db) / 3.0) } else { 0.0 };
+    rep.spread_pct = if enough { pct((40.0 - rep.spread_ms) / 30.0) } else { 0.0 };
+    rep.drift_pct = if enough { pct((100.0 - rep.drift_rms_ms) / 85.0) } else { 0.0 };
+    rep.timing_pct = (0.75 * rep.spread_pct + 0.25 * rep.drift_pct) * rep.hit_factor;
+    // Level spread: palm-muted notes on a 1..4 dB scale, open notes on 2..7 dB, weighted
+    // by note count.
+    let pm_score = pct((4.0 - rep.pm.level_std_db) / 3.0);
+    let open_score = pct((7.0 - rep.open.level_std_db) / 5.0);
+    let (np, no) = (rep.pm.n as f64, rep.open.n as f64);
+    rep.level_pct = if enough { (np * pm_score + no * open_score) / (np + no).max(1.0) } else { 0.0 };
     rep.centroid_pct = rep.centroid_std_oct.map(|s| pct((0.5 - s) / 0.4));
     rep.tone_pct = match rep.centroid_pct {
         Some(c) => 0.75 * rep.level_pct + 0.25 * c,
@@ -430,7 +458,7 @@ mod tests {
         (0..n).map(|i| GridIn { time: start + (i * step) as f64 * s16, slot: i % (16 / step), pm: true }).collect()
     }
 
-    fn onsets_from(grid: &[GridIn], f: impl Fn(usize) -> Option<(f64, f64)>) -> Vec<Onset> {
+    fn onsets_from(grid: &[GridIn], mut f: impl FnMut(usize) -> Option<(f64, f64)>) -> Vec<Onset> {
         grid.iter()
             .enumerate()
             .filter_map(|(i, g)| f(i).map(|(d, l)| Onset { time: g.time + d, level_db: l }))
@@ -484,9 +512,33 @@ mod tests {
         let mo = r.mean_offset_ms.unwrap();
         assert!((mo - 31.9).abs() < 3.0, "{mo}");
         assert!(r.level_std_detrended_db > 0.3 && r.level_std_detrended_db < 0.5);
-        // spread ~11 ms -> ~80 %, hit factor (152-1.5)/160
-        let expect = (35.0 - r.spread_ms) / 30.0 * 100.0 * (152.0 - 1.5) / 160.0;
+        // hit factor (152-1.5)/160
+        let expect = (0.75 * (40.0 - r.spread_ms) / 30.0 * 100.0 + 0.25 * r.drift_pct) * (152.0 - 1.5) / 160.0;
         assert!((r.timing_pct - expect).abs() < 1e-6);
+    }
+
+    #[test]
+    fn ioi_uniformity_ignores_lag_and_separates_drift() {
+        // Eighths at 120 BPM for 2 minutes, 120 ms constant lag, 8 ms jitter, and a slow
+        // 60 ms-amplitude tempo wander (period 30 s).
+        let s16 = 0.125;
+        let g = grid_for(480, 1.0, s16, 2);
+        let mut rng = Rng::new(5);
+        let on = onsets_from(&g, |i| {
+            let t = g[i].time;
+            let wander = 0.060 * (std::f64::consts::TAU * t / 30.0).sin();
+            Some((0.120 + wander + 0.008 * rng.gauss(), -17.0))
+        });
+        let r = score(&ScoreInput { grid: &g, onsets: &on, sixteenth: s16, slots_per_bar: 8, min_ioi: 2.0 * s16, calibrated: false, audio: None });
+        assert_eq!(r.n_matched, 480, "matching follows the wander");
+        assert!((r.latency_ms - 120.0).abs() < 15.0, "global offset {}", r.latency_ms);
+        assert!(r.spread_ms > 6.5 && r.spread_ms < 10.0, "uniformity {} ~ jitter 8 ms", r.spread_ms);
+        assert!((r.drift_rms_ms - 42.4).abs() < 6.0, "drift {} ~ 60/sqrt(2)", r.drift_rms_ms);
+        assert!(r.spread_total_ms > 40.0);
+        // Same playing with a different lag scores the same uniformity.
+        let on2: Vec<Onset> = on.iter().map(|o| Onset { time: o.time - 0.07, ..*o }).collect();
+        let r2 = score(&ScoreInput { grid: &g, onsets: &on2, sixteenth: s16, slots_per_bar: 8, min_ioi: 2.0 * s16, calibrated: false, audio: None });
+        assert!((r2.spread_ms - r.spread_ms).abs() < 1e-6);
     }
 
     #[test]

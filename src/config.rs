@@ -21,7 +21,14 @@ impl Config {
     pub fn load() -> Self {
         std::fs::read_to_string(data_dir().join("config.json"))
             .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
+            .and_then(|s| serde_json::from_str::<Config>(&s).ok())
+            .map(|mut c| {
+                // The old default click (-10 dB) was hard to hear over the amp.
+                if c.audio.click_volume_db == -10.0 {
+                    c.audio.click_volume_db = -4.0;
+                }
+                c
+            })
             .unwrap_or_default()
     }
     pub fn save(&self) {

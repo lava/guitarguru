@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::patterns::{BASE_BPM, BPM_MAX, BPM_MIN, BPM_STEP, INGREDIENTS, LH, Level, LevelKind, PM, S16, first_ingredients};
 
 /// Combined score (percent) needed to pass a level.
-pub const PASS_THRESHOLD: f64 = 80.0;
+pub const PASS_THRESHOLD: f64 = 60.0;
 
 pub fn data_dir() -> PathBuf {
     if let Some(d) = std::env::var_os("GG_DATA_DIR") {

@@ -36,7 +36,7 @@ pub struct AudioSettings {
 
 impl Default for AudioSettings {
     fn default() -> Self {
-        Self { input_device: None, input_channel: 0, output_device: None, buffer_frames: 128, click_volume_db: -10.0, monitor: true }
+        Self { input_device: None, input_channel: 0, output_device: None, buffer_frames: 128, click_volume_db: -4.0, monitor: true }
     }
 }
 

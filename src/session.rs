@@ -7,7 +7,6 @@ use serde::Serialize;
 
 use crate::audio::{ClickPlan, render_click};
 use crate::detect::{DetectParams, Onset, detect};
-use crate::monitor::{Chain, ToneSettings};
 use crate::patterns::{BEATS_PER_BAR, GridNote, Level, PATTERNS, SessionPlan, bar_seconds, beat_seconds, sixteenth_seconds};
 use crate::progress::data_dir;
 use crate::score::{GridIn, ScoreInput, ScoreReport, score};
@@ -196,7 +195,9 @@ impl RunData {
     /// Render a window of the DI through the amp chain, with the click mixed in.
     /// The click is placed where the player heard it: shifted by the window's local offset
     /// (latency and slow wander as tracked by the scorer).
-    pub fn render_listen(&self, w: &Window, tone: &ToneSettings, click_gain: f32) -> Vec<f32> {
+    /// Raw DI (no amp/cab), levelled so attacks sit around -24 dBFS, with the click
+    /// (`click_gain`, already boosted by the caller) where the player heard it.
+    pub fn render_listen(&self, w: &Window, click_gain: f32, attack_level_db: f64) -> Vec<f32> {
         let sr = f64::from(self.sample_rate);
         let (s0, s1) = self.window_span(w);
         let shift = self.grid_offset_s + w.offset_ms / 1e3;
@@ -205,17 +206,8 @@ impl RunData {
         if a >= b {
             return Vec::new();
         }
-        let mut chain = Chain::build(tone, self.sample_rate);
-        // Warm the amp up on the preceding half second.
-        let warm = a.saturating_sub((0.5 * sr) as usize);
-        let mut tmp = self.samples[warm..a].to_vec();
-        for c in tmp.chunks_mut(256) {
-            chain.process(c);
-        }
-        let mut out = self.samples[a..b].to_vec();
-        for c in out.chunks_mut(256) {
-            chain.process(c);
-        }
+        let di_gain = 10f64.powf((-24.0 - attack_level_db) / 20.0).clamp(0.1, 10.0) as f32;
+        let mut out: Vec<f32> = self.samples[a..b].iter().map(|v| v * di_gain).collect();
         let plan = ClickPlan {
             start_frame: 0,
             frames_per_beat: beat_seconds(self.plan.bpm) * sr,
@@ -368,7 +360,7 @@ pub fn load_run(json_path: &std::path::Path) -> Result<(RunData, serde_json::Val
 
 /// `guitarguru --rescore <run.json>...`: re-analyse saved runs and print old vs new numbers.
 pub fn rescore_cli(paths: &[String]) {
-    println!("{:<40} {:>5} {:>13} {:>13} {:>9} {:>11} {:>11} {:>11}", "run", "grid", "matched", "extra", "missed", "spread ms", "level dB", "combined");
+    println!("{:<40} {:>5} {:>13} {:>13} {:>9} {:>11} {:>11} {:>11}", "run", "grid", "matched", "extra", "missed", "evenness ms", "level dB", "combined");
     for p in paths {
         let path = std::path::Path::new(p);
         let name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
@@ -382,8 +374,9 @@ pub fn rescore_cli(paths: &[String]) {
                     o("spread_ms"), rep.spread_ms, o("level_std_detrended_db"), rep.level_std_detrended_db, o("combined_pct"), rep.combined_pct
                 );
                 println!(
-                    "    latency {:.0} ms  wander {:.1} ms  total spread {:.1} ms  timing {:.0} %  tone {:.0} %  quiet {}",
-                    rep.latency_ms, rep.wander_ms, rep.spread_total_ms, rep.timing_pct, rep.tone_pct, rep.n_quiet_ignored
+                    "    evenness {:.1} ms (IOI sd {:.1})  drift {:.0} ms rms  global offset {:.0} ms  timing {:.0} %  tone {:.0} %  pass {}",
+                    rep.spread_ms, rep.ioi_sd_ms, rep.drift_rms_ms, rep.latency_ms, rep.timing_pct, rep.tone_pct,
+                    if rep.combined_pct >= crate::progress::PASS_THRESHOLD { "yes" } else { "no" }
                 );
             }
             Err(e) => println!("{name:<40} skipped: {e}"),
@@ -423,7 +416,7 @@ mod tests {
         assert_eq!(worst.len(), 3);
         assert_eq!(run.window_bars(), 2);
         assert!(worst[0].start_bar == 3 || worst[0].start_bar == 4, "{worst:?}");
-        let audio = run.render_listen(&worst[0], &ToneSettings { amp: crate::monitor::AmpChoice::Drive, cab: None, ..Default::default() }, 0.3);
+        let audio = run.render_listen(&worst[0], 0.3, rep.level_median_db);
         let expect = (4.0 + 0.5 + 0.25) * 48000.0;
         assert_eq!(worst[0].pattern_id, "pursuit"); // 2 bars + 1 beat lead-in + half-beat tail
         assert!((audio.len() as f64 - expect).abs() < 2.0, "{}", audio.len());
