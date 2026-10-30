@@ -215,7 +215,8 @@ impl Game {
         };
         let seconds = if calibration { 8.0 * crate::patterns::bar_seconds(bpm) } else { SCORED_SECONDS };
         // Placeholder plan: the real count-in length is set when the count-in gate opens.
-        let plan = SessionPlan::new(&level, 1, seconds);
+        let seq = level.sequence(crate::patterns::scored_bars(bpm, seconds));
+        let plan = SessionPlan::from_sequence(bpm, 1, seq, level.pm_on());
         engine.start_recording();
         engine.start_clock_log();
         let sr = f64::from(SAMPLE_RATE);
@@ -285,8 +286,8 @@ impl Game {
                 // Start at the next bar line.
                 let bar = crate::patterns::bar_seconds(bpm);
                 let bars = ((now + 0.05) / bar).ceil().max(1.0) as u32;
-                let seconds = if play.calibration { 8.0 * bar } else { SCORED_SECONDS };
-                play.plan = SessionPlan::new(&play.level, bars, seconds);
+                // Same patterns as the placeholder plan, now after the real count-in.
+                play.plan = SessionPlan::from_sequence(bpm, bars, play.plan.sequence(), play.level.pm_on());
                 play.gate = None;
                 play.countin_seed_ms = Some(seed * 1e3);
                 engine.set_click(Some(ClickPlan {

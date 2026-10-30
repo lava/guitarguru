@@ -9,7 +9,7 @@ use bevy::color::{Alpha, Color};
 
 use crate::game::Game;
 use crate::mascot::{self, MascotImages, Mood, STAGE_NAMES, STAGE_NODS};
-use crate::paint::{Align, Font, Paint, col};
+use crate::paint::{Align, Font, Paint, col, fit};
 use crate::patterns::{BEATS_PER_BAR, INGREDIENTS, PATTERNS, Pattern, bar_seconds, beat_seconds, sixteenth_seconds};
 
 pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
@@ -106,9 +106,10 @@ pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
         let cur = play.plan.pattern_at(bar_idx);
         let (pm_on, tab) = (play.level.pm_on(), play.level.tab());
         p.label_at(120.0, 583.0, &section_letter(&play.plan.bar_patterns, cur), Align::Left, col::DIM);
-        p.serif(141.0, 576.0, PATTERNS[cur].name, 30.0, col::TEXT, Align::Left);
+        let cur_pat = &play.plan.patterns[cur];
+        p.serif(141.0, 576.0, fit(&cur_pat.name, 1150.0, 30.0), 30.0, col::TEXT, Align::Left);
         let playhead = if in_count_in { None } else { Some(pos16) };
-        let bottom = stroke_diagram(p, &PATTERNS[cur], 141.0, 600.0, 53.0, 36.0, playhead, pm_on, tab, 1.0);
+        let bottom = stroke_diagram(p, cur_pat, 141.0, 600.0, 53.0, 36.0, playhead, pm_on, tab, 1.0);
 
         // ---------- next pattern: fades in below during the last two bars
         if !waiting {
@@ -123,12 +124,13 @@ pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
                     let y = bottom + 18.0;
                     let a = |c: Color| c.with_alpha(alpha);
                     p.label_at(141.0, y, &format!("next \u{b7} {} bars", (remain / bar_s).ceil()), Align::Left, a(col::DIM));
-                    p.serif(141.0, y + 26.0, PATTERNS[next].name, 22.0, a(col::TEXT), Align::Left);
+                    let next_pat = &play.plan.patterns[next];
+                    p.serif(141.0, y + 26.0, fit(&next_pat.name, 440.0, 22.0), 22.0, a(col::TEXT), Align::Left);
                     let (lx, lw) = (141.0, 400.0);
                     p.rect(lx, y + 44.0, lw, 1.0, a(col::LINE));
                     p.rect(lx + lw * (1.0 - f), y + 43.5, lw * f, 2.0, a(col::OCHRE));
                     // Small arrows of the next pattern (played strokes only).
-                    let hits = PATTERNS[next].hits();
+                    let hits = next_pat.hits();
                     for n in &hits {
                         let x = 600.0 + n.pos as f32 * 26.0;
                         p.stroke_arrow(x, y + 26.0, 16.0, n.downstroke(), a(col::DIM));

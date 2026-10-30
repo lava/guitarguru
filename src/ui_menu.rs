@@ -273,7 +273,7 @@ pub fn draw(g: &mut Game, p: &mut Paint, keys: &ButtonInput<KeyCode>, imgs: &Mas
             p.rect(dx - 10.0, y + 8.0, 2.0, row_h - 16.0, col::OCHRE);
         }
         let c = if open { col::TEXT } else { col::FAINT };
-        p.styled(dx, y + row_h / 2.0, fit(PATTERNS[pi].name, dw - 150.0, 16.0), 16.0, c, Align::Left, Font::SansMedium, 0.0);
+        p.styled(dx, y + row_h / 2.0, fit(&PATTERNS[pi].name, dw - 150.0, 16.0), 16.0, c, Align::Left, Font::SansMedium, 0.0);
         p.text(dx + dw - 48.0, y + row_h / 2.0 + 2.0, if open { format!("{} BPM", sel.bpm) } else { "locked".into() }, 12.0, col::DIM, Align::Right);
         let best = g.progress.best(&d).map_or("\u{2013}".to_string(), |b| format!("{b:.0}"));
         p.serif(dx + dw, y + row_h / 2.0 - 2.0, best, 22.0, if g.progress.passed(&d) { col::ONTIME } else { col::TEXT }, Align::Right);

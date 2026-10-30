@@ -9,6 +9,8 @@
 //!   `S` sixteenth (1), `T` sixteenth-triplet (2/3); a leading `-` makes a rest (`-Q`).
 //!   Pick directions follow alternate picking on the 16th grid.
 
+use std::borrow::Cow;
+
 use serde::{Deserialize, Serialize};
 
 pub const BPM_MIN: u32 = 40;
@@ -22,21 +24,30 @@ pub fn bpm_steps() -> impl Iterator<Item = u32> {
     (BPM_MIN..=BPM_MAX).step_by(BPM_STEP as usize)
 }
 
-#[derive(Clone, Debug)]
+/// Pattern text: borrowed for the built-in patterns, owned for generated ones.
+pub type Str = Cow<'static, str>;
+
+/// One bar of rhythm (and optionally fretting). Built-in patterns live in `PATTERNS`;
+/// generated ones are made per run (see `generator`). A session plan owns the patterns
+/// it plays, so both kinds go through the same code.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Pattern {
-    pub id: &'static str,
-    pub name: &'static str,
+    pub id: Str,
+    pub name: Str,
     /// Ingredients this pattern needs (bit mask, see `INGREDIENTS`); 0 = basic.
     pub needs: u8,
-    pub notation: &'static str,
+    pub notation: Str,
     /// Used in runs (false: drill only, e.g. named riffs).
+    #[serde(skip)]
     pub in_tracks: bool,
     /// Fretting per played note, space separated: string letter (`E A D G B e`, low to
     /// high) + fret, `p` suffix for a 5th power chord (root + the next string two frets up),
     /// e.g. `E0 E3 A5p`. None = every note on the open low E.
-    pub frets: Option<&'static str>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frets: Option<Str>,
     /// For multi-bar riffs: the pattern id of the next bar (drills alternate through them).
-    pub then: Option<&'static str>,
+    #[serde(skip)]
+    pub then: Option<Str>,
 }
 
 /// Where a note is played. Strings are numbered 1 (high e) to 6 (low E), E standard.
@@ -111,12 +122,39 @@ pub fn mask_name(mask: u8) -> String {
 }
 
 const fn pat(id: &'static str, name: &'static str, needs: u8, notation: &'static str) -> Pattern {
-    Pattern { id, name, needs, notation, in_tracks: true, frets: None, then: None }
+    Pattern { id: Cow::Borrowed(id), name: Cow::Borrowed(name), needs, notation: Cow::Borrowed(notation), in_tracks: true, frets: None, then: None }
 }
 
 /// A pattern with changing notes (left hand).
 const fn lh(id: &'static str, name: &'static str, needs: u8, notation: &'static str, frets: &'static str) -> Pattern {
-    Pattern { id, name, needs: needs | LH, notation, in_tracks: true, frets: Some(frets), then: None }
+    Pattern {
+        id: Cow::Borrowed(id),
+        name: Cow::Borrowed(name),
+        needs: needs | LH,
+        notation: Cow::Borrowed(notation),
+        in_tracks: true,
+        frets: Some(Cow::Borrowed(frets)),
+        then: None,
+    }
+}
+
+/// A drill-only riff bar.
+const fn riff(id: &'static str, name: &'static str, needs: u8, notation: &'static str, frets: Option<&'static str>, then: Option<&'static str>) -> Pattern {
+    Pattern {
+        id: Cow::Borrowed(id),
+        name: Cow::Borrowed(name),
+        needs,
+        notation: Cow::Borrowed(notation),
+        in_tracks: false,
+        frets: match frets {
+            Some(f) => Some(Cow::Borrowed(f)),
+            None => None,
+        },
+        then: match then {
+            Some(t) => Some(Cow::Borrowed(t)),
+            None => None,
+        },
+    }
 }
 
 /// All patterns. Add new ones here. Every run starts with `quarters`; the rest of its
@@ -170,30 +208,14 @@ pub const PATTERNS: &[Pattern] = &[
     lh("lh_chords", "Power chords", 0, "8:D-D-D-D-", "E0p E0p E3p E5p"),
     lh("lh_chords_pm", "P.M. power chords", PM, "8:dddddddd", "E0p E0p E0p E0p E3p E3p E5p E5p"),
     // Drill-only named riffs (Pursuit of Vikings, Amon Amarth; frets as in E standard).
-    Pattern { id: "pursuit", name: "Pursuit of Vikings: intro", needs: S16, notation: "16:d-dud-d-dud-dud-", in_tracks: false, frets: None, then: None },
-    Pattern {
-        id: "pursuit_verse",
-        name: "Pursuit of Vikings: verse",
-        needs: S16 | LH,
-        notation: "16:D-dud-D-D-d-D-d-",
-        in_tracks: false,
-        frets: Some("A7 E0 E0 E0 A9 A10 E0 A7 E0"),
-        then: Some("pursuit_verse_b"),
-    },
-    Pattern {
-        id: "pursuit_verse_b",
-        name: "Pursuit of Vikings: verse (bar 2)",
-        needs: S16 | LH,
-        notation: "16:D-dud-d-dud-dud-",
-        in_tracks: false,
-        frets: Some("D9 E0 E0 E0 E0 E0 E0 E0 E0 E0 E0"),
-        then: Some("pursuit_verse"),
-    },
+    riff("pursuit", "Pursuit of Vikings: intro", S16, "16:d-dud-d-dud-dud-", None, None),
+    riff("pursuit_verse", "Pursuit of Vikings: verse", S16 | LH, "16:D-dud-D-D-d-D-d-", Some("A7 E0 E0 E0 A9 A10 E0 A7 E0"), Some("pursuit_verse_b")),
+    riff("pursuit_verse_b", "Pursuit of Vikings: verse (bar 2)", S16 | LH, "16:D-dud-d-dud-dud-", Some("D9 E0 E0 E0 E0 E0 E0 E0 E0 E0 E0"), Some("pursuit_verse")),
 ];
 
 /// Patterns only reachable as the later bars of a multi-bar riff (not listed as drills).
 pub fn is_riff_continuation(i: usize) -> bool {
-    PATTERNS[..i].iter().any(|p| p.then == Some(PATTERNS[i].id))
+    PATTERNS[..i].iter().any(|p| p.then.as_deref() == Some(&*PATTERNS[i].id))
 }
 
 #[cfg(test)]
@@ -304,7 +326,7 @@ impl BarNote {
 
 impl Pattern {
     pub fn bar(&self) -> Vec<BarNote> {
-        parse(self.notation).expect("built-in pattern must parse")
+        parse(&self.notation).expect("pattern must parse")
     }
     #[cfg_attr(not(test), allow(dead_code))]
     /// The picking grid in sixteenths per stroke: 2 for `8:` patterns, 1 for 16th-based
@@ -351,9 +373,9 @@ impl Pattern {
     /// Fretting of each played note (defaults to the open low E).
     pub fn frettings(&self) -> Vec<Fretting> {
         let n = self.hits().len();
-        match self.frets {
+        match &self.frets {
             None => vec![Fretting::OPEN_E; n],
-            Some(f) => f.split_whitespace().map(|t| Fretting::parse(t).expect("built-in fretting must parse")).collect(),
+            Some(f) => f.split_whitespace().map(|t| Fretting::parse(t).expect("pattern fretting must parse")).collect(),
         }
     }
 
@@ -444,24 +466,50 @@ impl Level {
             LevelKind::Drill(p) => format!("{} drill", PATTERNS[p].name),
         }
     }
-    /// Pattern (index into `PATTERNS`) for each scored bar.
-    pub fn bar_patterns(&self, bars: u32) -> Vec<usize> {
+    /// The patterns of a session of `bars` scored bars.
+    pub fn sequence(&self, bars: u32) -> Sequence {
         match self.kind {
             LevelKind::Drill(p) => {
                 // Multi-bar riffs cycle through their bars.
-                let mut out = Vec::with_capacity(bars as usize);
+                let mut order = Vec::with_capacity(bars as usize);
                 let mut cur = p;
                 for _ in 0..bars {
-                    out.push(cur);
-                    cur = PATTERNS[cur].then.and_then(|id| PATTERNS.iter().position(|q| q.id == id)).unwrap_or(p);
+                    order.push(cur);
+                    cur = PATTERNS[cur].then.as_deref().and_then(|id| PATTERNS.iter().position(|q| q.id == id)).unwrap_or(p);
                 }
-                out
+                Sequence::from_static(&order)
             }
             LevelKind::Run(m) => {
                 let order = run_segments(m, bars.div_ceil(SEGMENT_BARS) as usize, &self.key());
-                (0..bars).map(|b| order[(b / SEGMENT_BARS) as usize]).collect()
+                let per_bar: Vec<usize> = (0..bars).map(|b| order[(b / SEGMENT_BARS) as usize]).collect();
+                Sequence::from_static(&per_bar)
             }
         }
+    }
+}
+
+/// What a session plays: its own pattern table and the pattern of every scored bar.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Sequence {
+    pub patterns: Vec<Pattern>,
+    /// Index into `patterns` per scored bar.
+    pub bar_patterns: Vec<usize>,
+}
+
+impl Sequence {
+    /// A sequence from built-in patterns (indices into `PATTERNS`, one per bar).
+    pub fn from_static(bars: &[usize]) -> Self {
+        let mut used: Vec<usize> = Vec::new();
+        let bar_patterns = bars
+            .iter()
+            .map(|&p| {
+                used.iter().position(|&u| u == p).unwrap_or_else(|| {
+                    used.push(p);
+                    used.len() - 1
+                })
+            })
+            .collect();
+        Self { patterns: used.into_iter().map(|p| PATTERNS[p].clone()).collect(), bar_patterns }
     }
 }
 
@@ -515,7 +563,7 @@ pub struct GridNote {
     /// Seconds from the session start (the first count-in click).
     pub time: f64,
     pub bar: u32,
-    /// Pattern of this bar (index into `PATTERNS`).
+    /// Pattern of this bar (index into the plan's `patterns`).
     pub pattern: usize,
     /// Index of the note among the played notes of its pattern's bar (the "slot").
     pub slot: usize,
@@ -532,19 +580,23 @@ pub struct SessionPlan {
     pub bpm: u32,
     pub count_in_bars: u32,
     pub scored_bars: u32,
-    /// Pattern per scored bar.
+    /// The patterns this session plays.
+    pub patterns: Vec<Pattern>,
+    /// Pattern per scored bar (index into `patterns`).
     pub bar_patterns: Vec<usize>,
     pub notes: Vec<GridNote>,
 }
 
 impl SessionPlan {
+    #[cfg(test)]
     pub fn new(level: &Level, count_in_bars: u32, scored_seconds: f64) -> Self {
-        let scored_bars = ((scored_seconds / bar_seconds(level.bpm)).round() as u32).max(1);
-        Self::from_bars(level.bpm, count_in_bars, level.bar_patterns(scored_bars), level.pm_on())
+        let seq = level.sequence(scored_bars(level.bpm, scored_seconds));
+        Self::from_sequence(level.bpm, count_in_bars, seq, level.pm_on())
     }
 
-    /// A plan from an explicit pattern per scored bar (e.g. reloaded from a saved run).
-    pub fn from_bars(bpm: u32, count_in_bars: u32, bar_patterns: Vec<usize>, pm_on: bool) -> Self {
+    /// A plan playing `seq` after `count_in_bars` bars of count-in.
+    pub fn from_sequence(bpm: u32, count_in_bars: u32, seq: Sequence, pm_on: bool) -> Self {
+        let Sequence { patterns, bar_patterns } = seq;
         let bar_s = bar_seconds(bpm);
         let scored_bars = bar_patterns.len() as u32;
         let s16 = sixteenth_seconds(bpm);
@@ -552,14 +604,18 @@ impl SessionPlan {
         for b in 0..scored_bars {
             let pi = bar_patterns[b as usize];
             let bar_start = f64::from(count_in_bars + b) * bar_s;
-            let fr = PATTERNS[pi].frettings();
-            for (slot, n) in PATTERNS[pi].hits().iter().enumerate() {
+            let fr = patterns[pi].frettings();
+            for (slot, n) in patterns[pi].hits().iter().enumerate() {
                 let fretting = fr.get(slot).copied().unwrap_or(Fretting::OPEN_E);
                 let pm = n.pm && pm_on;
                 notes.push(GridNote { time: bar_start + n.pos * s16, bar: b, pattern: pi, slot, pm, fretting, midi: fretting.midi() });
             }
         }
-        Self { bpm, count_in_bars, scored_bars, bar_patterns, notes }
+        Self { bpm, count_in_bars, scored_bars, patterns, bar_patterns, notes }
+    }
+    /// The sequence this plan plays.
+    pub fn sequence(&self) -> Sequence {
+        Sequence { patterns: self.patterns.clone(), bar_patterns: self.bar_patterns.clone() }
     }
     /// Pattern of scored bar `b` (count-in bars show the first pattern).
     pub fn pattern_at(&self, bar: i64) -> usize {
@@ -583,6 +639,11 @@ impl SessionPlan {
     }
 }
 
+/// Scored bars of a session of about `seconds` seconds.
+pub fn scored_bars(bpm: u32, seconds: f64) -> u32 {
+    ((seconds / bar_seconds(bpm)).round() as u32).max(1)
+}
+
 pub fn beat_seconds(bpm: u32) -> f64 {
     60.0 / f64::from(bpm)
 }
@@ -600,18 +661,18 @@ mod tests {
     #[test]
     fn all_patterns_fill_one_bar() {
         for p in PATTERNS {
-            assert!(parse(p.notation).is_ok(), "{}", p.id);
-            if let Some(f) = p.frets {
+            assert!(parse(&p.notation).is_ok(), "{}", p.id);
+            if let Some(f) = &p.frets {
                 let n = f.split_whitespace().map(Fretting::parse).collect::<Result<Vec<_>, _>>().unwrap();
                 assert_eq!(n.len(), p.hits().len(), "{}: one fretting per played note", p.id);
             }
-            if let Some(t) = p.then {
-                assert!(PATTERNS.iter().any(|q| q.id == t), "{}: unknown next bar {t}", p.id);
+            if let Some(t) = &p.then {
+                assert!(PATTERNS.iter().any(|q| q.id == *t), "{}: unknown next bar {t}", p.id);
             }
         }
         let verse = PATTERNS.iter().position(|p| p.id == "pursuit_verse").unwrap();
-        let bars = Level::drill(verse, 120).bar_patterns(4);
-        assert_eq!(bars.iter().map(|&i| PATTERNS[i].id).collect::<Vec<_>>(), ["pursuit_verse", "pursuit_verse_b", "pursuit_verse", "pursuit_verse_b"]);
+        let seq = Level::drill(verse, 120).sequence(4);
+        assert_eq!(seq.bar_patterns.iter().map(|&i| &*seq.patterns[i].id).collect::<Vec<_>>(), ["pursuit_verse", "pursuit_verse_b", "pursuit_verse", "pursuit_verse_b"]);
         assert_eq!(Fretting::parse("A5p").unwrap().midi(), 50);
         assert_eq!(Fretting::OPEN_E.midi(), 40);
         let b = PATTERNS.iter().position(|p| p.id == "pursuit_verse_b").unwrap();

@@ -7,7 +7,7 @@ use serde::Serialize;
 
 use crate::audio::{ClickPlan, render_click};
 use crate::detect::{DetectParams, Onset, detect};
-use crate::patterns::{BEATS_PER_BAR, GridNote, Level, PATTERNS, SessionPlan, bar_seconds, beat_seconds, sixteenth_seconds};
+use crate::patterns::{BEATS_PER_BAR, GridNote, Level, PATTERNS, Sequence, SessionPlan, bar_seconds, beat_seconds, sixteenth_seconds};
 use crate::progress::data_dir;
 use crate::score::{GridIn, ScoreInput, ScoreReport, score};
 
@@ -48,9 +48,10 @@ pub struct Window {
     /// Indices into `ScoreReport::notes`.
     pub notes: Vec<usize>,
     pub n_extra: usize,
-    /// Pattern played in this window (index into `PATTERNS`); windows never span a switch.
+    /// Pattern played in this window (index into the plan's patterns); windows never span
+    /// a switch.
     pub pattern: usize,
-    pub pattern_id: &'static str,
+    pub pattern_id: String,
     /// Local offset (latency + wander) of the window's notes, ms, relative to the grid.
     pub offset_ms: f64,
 }
@@ -80,7 +81,7 @@ impl RunData {
     /// Flat slot table: one entry per (pattern, slot within the pattern's bar). Per-slot
     /// statistics are per pattern, since a slot means something different in each.
     pub fn slot_table(&self) -> Vec<(usize, usize)> {
-        self.patterns_used().into_iter().flat_map(|p| (0..PATTERNS[p].hits().len()).map(move |s| (p, s))).collect()
+        self.patterns_used().into_iter().flat_map(|p| (0..self.plan.patterns[p].hits().len()).map(move |s| (p, s))).collect()
     }
 
     pub fn score_onsets(&self, onsets: &[Onset]) -> ScoreReport {
@@ -91,7 +92,7 @@ impl RunData {
         let min_len = self
             .patterns_used()
             .iter()
-            .flat_map(|&p| PATTERNS[p].hits())
+            .flat_map(|&p| self.plan.patterns[p].hits())
             .map(|n| n.len)
             .fold(f64::INFINITY, f64::min);
         let mut rep = score(&ScoreInput {
@@ -105,9 +106,10 @@ impl RunData {
         });
         for st in &mut rep.slots {
             if let Some(&(p, s)) = table.get(st.slot) {
-                st.pattern = PATTERNS[p].id.to_string();
+                let pat = &self.plan.patterns[p];
+                st.pattern = pat.id.to_string();
                 st.slot_in_pattern = s;
-                st.pos16 = PATTERNS[p].hits()[s].pos;
+                st.pos16 = pat.hits()[s].pos;
             }
         }
         rep
@@ -168,7 +170,7 @@ impl RunData {
                     .filter(|o| o.time >= t0 - w && o.time < t1 - w && !matched.contains(&o.time.to_bits()) && o.level_db >= quiet)
                     .count();
                 let err = (idx.iter().map(|&i| note_err(i)).sum::<f64>() + 30.0 * extra as f64) / idx.len() as f64;
-                cands.push(Window { start_bar: start, bars: wb, error: err, notes: idx, n_extra: extra, pattern: pat, pattern_id: PATTERNS[pat].id, offset_ms });
+                cands.push(Window { start_bar: start, bars: wb, error: err, notes: idx, n_extra: extra, pattern: pat, pattern_id: self.plan.patterns[pat].id.to_string(), offset_ms });
             }
             start += 1;
         }
@@ -237,14 +239,14 @@ impl RunData {
         }
         w.finalize().map_err(|e| e.to_string())?;
         #[derive(Serialize)]
-        struct PatternInfo {
-            id: &'static str,
-            name: &'static str,
-            notation: &'static str,
+        struct PatternInfo<'a> {
+            id: &'a str,
+            name: &'a str,
+            notation: &'a str,
         }
         #[derive(Serialize)]
-        struct SlotInfo {
-            pattern: &'static str,
+        struct SlotInfo<'a> {
+            pattern: &'a str,
             slot: usize,
             pos16: f64,
         }
@@ -253,10 +255,10 @@ impl RunData {
             level: String,
             level_name: String,
             /// Patterns used, and the pattern id of every scored bar.
-            patterns: Vec<PatternInfo>,
-            bar_patterns: Vec<&'static str>,
+            patterns: Vec<PatternInfo<'a>>,
+            bar_patterns: Vec<&'a str>,
             /// Flat slot ids used by `report.slots` and `report.notes[].slot`.
-            slots: Vec<SlotInfo>,
+            slots: Vec<SlotInfo<'a>>,
             bpm: u32,
             sample_rate: u32,
             count_in_bars: u32,
@@ -272,19 +274,20 @@ impl RunData {
             worst_windows: &'a [Window],
             report: &'a ScoreReport,
         }
+        let pats = &self.plan.patterns;
         let out = Out {
             level: self.level.key(),
             level_name: self.level.name(),
             patterns: self
                 .patterns_used()
                 .into_iter()
-                .map(|p| PatternInfo { id: PATTERNS[p].id, name: PATTERNS[p].name, notation: PATTERNS[p].notation })
+                .map(|p| PatternInfo { id: &pats[p].id, name: &pats[p].name, notation: &pats[p].notation })
                 .collect(),
-            bar_patterns: self.plan.bar_patterns.iter().map(|&p| PATTERNS[p].id).collect(),
+            bar_patterns: self.plan.bar_patterns.iter().map(|&p| &*pats[p].id).collect(),
             slots: self
                 .slot_table()
                 .into_iter()
-                .map(|(p, s)| SlotInfo { pattern: PATTERNS[p].id, slot: s, pos16: PATTERNS[p].hits()[s].pos })
+                .map(|(p, s)| SlotInfo { pattern: &pats[p].id, slot: s, pos16: pats[p].hits()[s].pos })
                 .collect(),
             bpm: self.plan.bpm,
             sample_rate: self.sample_rate,
@@ -329,7 +332,7 @@ pub fn load_run(json_path: &std::path::Path) -> Result<(RunData, serde_json::Val
         .and_then(|v| v.as_str())
         .and_then(Level::from_key)
         .unwrap_or_else(|| if bar_patterns.iter().all(|&p| p == bar_patterns[0]) { Level::drill(bar_patterns[0], bpm) } else { Level::run(0, bpm) });
-    let plan = SessionPlan::from_bars(bpm, count_in, bar_patterns, level.pm_on());
+    let plan = SessionPlan::from_sequence(bpm, count_in, Sequence::from_static(&bar_patterns), level.pm_on());
     // The saved grid is authoritative for timing: check the rebuilt plan agrees.
     if let Some(g) = j.get("grid").and_then(|v| v.as_array()) {
         let times: Vec<f64> = g.iter().filter_map(|n| n.get("time").and_then(serde_json::Value::as_f64)).collect();

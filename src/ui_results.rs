@@ -259,7 +259,7 @@ fn verdict(r: &ResultsState, pass: bool, better: bool) -> String {
     } else if rep.drift_rms_ms > 40.0 {
         "You drift away from the click over the run; listen for beat one.".to_string()
     } else if let Some(s) = slot {
-        let name = PATTERNS.iter().find(|p| p.id == s.pattern).map_or("the pattern", |p| p.name);
+        let name = r.run.plan.patterns.iter().find(|p| p.id == s.pattern).map_or("the pattern", |p| &*p.name);
         format!("In {name}, {} comes {} ({:+.0} ms).", count_name(s.pos16), if s.mean_ms < 0.0 { "early" } else { "late" }, s.mean_ms)
     } else if rep.spread_ms > 25.0 {
         "The notes come unevenly; slow down a step and lock in.".to_string()
@@ -328,7 +328,7 @@ fn listen_card(p: &mut Paint, r: &ResultsState, i: usize, w: &Window, x: f32, y:
     if let Some((pos, len)) = playing {
         p.rect(x, y + 57.0, cw * pos as f32 / len.max(1) as f32, 2.0, col::OCHRE);
     }
-    p.label_at(x, y + 80.0, &format!("{} \u{b7} {}", letter_of(run, w.pattern), PATTERNS[w.pattern].name), Align::Left, col::DIM);
+    p.label_at(x, y + 80.0, &format!("{} \u{b7} {}", letter_of(run, w.pattern), fit(&run.plan.patterns[w.pattern].name, 300.0, 13.0)), Align::Left, col::DIM);
     // notes: arrow row and coloured dot row on a 16th grid over the window
     let six = sixteenth_seconds(run.plan.bpm);
     let wstart = st + f64::from(w.start_bar) * bar_seconds(run.plan.bpm);
@@ -337,7 +337,7 @@ fn listen_card(p: &mut Paint, r: &ResultsState, i: usize, w: &Window, x: f32, y:
     for &ni in &w.notes {
         let n = &rep.notes[ni];
         let gnote = &run.plan.notes[ni];
-        let pat = &PATTERNS[gnote.pattern];
+        let pat = &run.plan.patterns[gnote.pattern];
         let down = pat.hits().get(gnote.slot).is_none_or(|h| h.downstroke());
         let nx = x + ((gnote.time - wstart) / six) as f32 * px16 + 3.0;
         p.stroke_arrow(nx, y + 106.0, 12.0, down, col::TEXT);
@@ -466,9 +466,9 @@ fn timing_section(p: &mut Paint, r: &ResultsState, x: f32, y: f32) {
     for (ri, (id, _)) in pats.iter().enumerate() {
         let ry = py + 30.0 + ri as f32 * 120.0;
         p.hline(x, ry, 1130.0, col::LINE);
-        let pi = PATTERNS.iter().position(|q| q.id == *id).unwrap_or(0);
+        let pi = r.run.plan.patterns.iter().position(|q| q.id == *id).unwrap_or(0);
         p.label(x, ry + 20.0, &format!("pattern {}", letter_of(&r.run, pi)));
-        p.serif(x, ry + 46.0, fit(PATTERNS[pi].name, 250.0, 20.0), 20.0, col::TEXT, Align::Left);
+        p.serif(x, ry + 46.0, fit(&r.run.plan.patterns[pi].name, 250.0, 20.0), 20.0, col::TEXT, Align::Left);
         let (gx, gw) = (x + 260.0, 870.0);
         let mid = ry + 58.0;
         p.hline(gx, mid, gw, col::LINE);
