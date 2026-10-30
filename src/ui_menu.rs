@@ -90,6 +90,15 @@ pub fn draw(g: &mut Game, p: &mut Paint, keys: &ButtonInput<KeyCode>, imgs: &Mas
     let pose = mascot::pose(stage, Some(beats));
     mascot::draw(p, imgs, 220.0, 196.0, 1.15, stage, Mood::Neutral, &pose);
 
+    // ---------- songs to try (reached milestones), under the guru
+    let songs = crate::songs::reached(&g.progress);
+    if !songs.is_empty() {
+        p.label(170.0, 690.0, "songs to try");
+        for (i, s) in songs.iter().rev().take(6).enumerate() {
+            p.text(170.0, 716.0 + i as f32 * 22.0, fit(&s.label(), 420.0, 13.0), 13.0, col::DIM, Align::Left);
+        }
+    }
+
     // ---------- ingredients
     p.label(RX, 214.0, "ingredients");
     let unlocked_mask = g.progress.unlocked_mask();

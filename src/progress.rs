@@ -42,6 +42,9 @@ pub struct Progress {
     /// same combination can pass over them.
     #[serde(default)]
     pub recent_patterns: BTreeMap<String, Vec<Vec<String>>>,
+    /// Song suggestions already shown (`Song::label`).
+    #[serde(default)]
+    pub songs_shown: BTreeSet<String>,
     /// Layout version of this file (see `migrate`); 0 for files from before versioning.
     #[serde(default)]
     pub version: u32,

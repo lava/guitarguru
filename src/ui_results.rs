@@ -135,17 +135,24 @@ pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
     if let Some(note) = &r.difficulty_note {
         p.text(752.0, fy + 136.0, fit(note, 490.0, 12.0), 12.0, col::DIM, Align::Left);
     }
+    let mut ly = 482.0;
     if !r.newly.is_empty() {
         let txt: Vec<String> = r.newly.iter().map(|u| u.label()).collect();
-        p.label(752.0, 482.0, "opened");
-        p.serif(816.0, 478.0, fit(&txt.join(", "), 420.0, 22.0), 22.0, col::ONTIME, Align::Left);
+        p.label(752.0, ly, "opened");
+        p.serif(816.0, ly - 4.0, fit(&txt.join(", "), 420.0, 22.0), 22.0, col::ONTIME, Align::Left);
+        ly += 34.0;
+    }
+    if let Some(s) = r.song {
+        // The guru's suggestion, in its italic voice.
+        let line = if s.advice.is_empty() { format!("Try: {}", s.label()) } else { format!("Try: {} \u{2013} {}", s.label(), s.advice) };
+        p.italic(752.0, ly - 4.0, fit(&line, 490.0, 21.0), 21.0, col::TEXT, Align::Left);
     }
     match &r.saved {
         Ok(path) => {
             let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-            p.text(752.0, 520.0, format!("saved \u{b7} {}", fit(&name, 440.0, 11.0)), 11.0, col::FAINT, Align::Left);
+            p.text(752.0, 548.0, format!("saved \u{b7} {}", fit(&name, 440.0, 11.0)), 11.0, col::FAINT, Align::Left);
         }
-        Err(e) => p.text(752.0, 520.0, format!("save failed: {e}"), 11.0, col::LATE, Align::Left),
+        Err(e) => p.text(752.0, 548.0, format!("save failed: {e}"), 11.0, col::LATE, Align::Left),
     }
 
     // ---------- the whole run

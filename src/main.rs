@@ -13,6 +13,7 @@ mod patterns;
 mod progress;
 mod score;
 mod session;
+mod songs;
 mod tone;
 mod ui_menu;
 mod ui_play;

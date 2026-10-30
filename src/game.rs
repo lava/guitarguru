@@ -66,6 +66,8 @@ pub struct ResultsState {
     pub difficulty_note: Option<String>,
     pub listening: Option<usize>,
     pub calibration: bool,
+    /// A song to try, suggested for the first time by this pass.
+    pub song: Option<&'static crate::songs::Song>,
     /// Height of the results page as last drawn (design px).
     pub content_h: Option<f32>,
 }
@@ -366,6 +368,7 @@ impl Game {
         let prev_best = self.progress.best_entry(&key).cloned();
         let difficulty = run.avg_difficulty();
         let mut newly = Vec::new();
+        let mut song = None;
         if play.calibration {
             if rep.n_matched >= 6 {
                 self.cfg.latency_ms = Some(rep.latency_ms);
@@ -373,6 +376,9 @@ impl Game {
             }
         } else {
             newly = self.progress.record(&run.level, rep.combined_pct);
+            if rep.combined_pct >= crate::progress::PASS_THRESHOLD {
+                song = crate::songs::suggest(&mut self.progress, &run.level);
+            }
             self.progress.history.push(HistoryEntry {
                 key: key.clone(),
                 date: chrono::Local::now().format("%Y-%m-%d %H:%M").to_string(),
@@ -402,6 +408,7 @@ impl Game {
             prev_best,
             listening: None,
             calibration: play.calibration,
+            song,
             content_h: None,
         });
         self.screen = Screen::Results;
@@ -431,6 +438,7 @@ impl Game {
             difficulty_note: None,
             listening: None,
             calibration: false,
+            song: None,
             content_h: None,
         });
         self.screen = Screen::Results;
