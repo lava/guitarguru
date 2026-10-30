@@ -2,8 +2,8 @@
 //! score, the guru (happy or sad) with a short verdict, fact columns, the whole run (drift
 //! against the global offset, weak-spot pins, section letters), "Listen again" for the
 //! three weakest windows, the timing section (evenness headline, global offset, interval
-//! errors, deviations, per-pattern slots) and the tone section (palm-muted and open notes
-//! apart).
+//! errors per kind of interval, deviations, per-pattern slots) and the tone section (stroke
+//! envelopes per pick direction and P.M. group).
 
 use bevy::color::{Alpha, Color};
 
@@ -470,11 +470,11 @@ fn timing_section(p: &mut Paint, r: &ResultsState, x: f32, y: f32) -> f32 {
     p.text(hx + hw / 2.0, base + 14.0, "0", 11.0, col::DIM, Align::Center);
     p.text(hx + hw - bw, base + 14.0, "+60 ms", 11.0, col::DIM, Align::Center);
 
-    // per-pattern slots (lollipops)
-    // interval errors
-    ioi_histogram(p, rep, x, y + 320.0, 1130.0, 150.0);
+    // interval errors, per kind of interval
+    let iy = intervals_section(p, r, x, y + 320.0, 1130.0);
 
-    let py = y + 560.0;
+    // per-pattern slots (lollipops)
+    let py = iy + 30.0;
     p.serif(x, py, "Each sixteenth, pattern by pattern", 22.0, col::TEXT, Align::Left);
     let mut pats: Vec<(String, usize)> = Vec::new();
     for s in &rep.slots {
@@ -681,50 +681,103 @@ fn draw_calibration(g: &mut Game, p: &mut Paint) {
     let _ = Font::Sans;
 }
 
-/// Histogram of the interval errors (actual minus expected time between consecutive
-/// matched attacks, ms), the quantity the evenness score is made of. Ochre hairlines mark
-/// +/- one standard deviation; evenness = that sd / sqrt(2).
-fn ioi_histogram(p: &mut Paint, rep: &ScoreReport, x: f32, y: f32, w: f32, h: f32) {
-    let devs: Vec<f64> = rep.notes.iter().filter_map(|n| n.dev_ms).collect();
-    let errs: Vec<f64> = devs.windows(2).map(|d| d[1] - d[0]).collect();
+/// Musical name of a nominal interval in sixteenths (thirds of a sixteenth for triplets).
+fn interval_name(sixteenths: f64) -> String {
+    let named = [
+        (2.0 / 3.0, "16th triplet"),
+        (1.0, "16th"),
+        (4.0 / 3.0, "8th triplet"),
+        (2.0, "8th"),
+        (3.0, "dotted 8th"),
+        (8.0 / 3.0, "quarter triplet"),
+        (4.0, "quarter"),
+        (5.0, "quarter + 16th"),
+        (6.0, "dotted quarter"),
+        (8.0, "half"),
+        (12.0, "dotted half"),
+        (16.0, "whole"),
+    ];
+    named
+        .iter()
+        .find(|(v, _)| (v - sixteenths).abs() < 0.05)
+        .map_or_else(|| format!("{} sixteenths", (sixteenths * 100.0).round() / 100.0), |(_, n)| n.to_string())
+}
+
+/// Interval errors (actual minus nominal time between consecutive matched notes, ms),
+/// grouped by nominal length in sixteenths, shortest first. Intervals across a missed
+/// note are left out.
+fn interval_groups(rep: &ScoreReport, sixteenth: f64) -> Vec<(f64, Vec<f64>)> {
+    let mut groups: Vec<(f64, Vec<f64>)> = Vec::new();
+    for w in rep.notes.windows(2) {
+        let (Some(a), Some(b)) = (w[0].dev_ms, w[1].dev_ms) else { continue };
+        let nominal = ((w[1].grid_time - w[0].grid_time) / sixteenth * 3.0).round() / 3.0;
+        match groups.iter_mut().find(|g| (g.0 - nominal).abs() < 1e-6) {
+            Some(g) => g.1.push(b - a),
+            None => groups.push((nominal, vec![b - a])),
+        }
+    }
+    groups.retain(|g| g.1.len() >= 3);
+    groups.sort_by(|a, b| a.0.total_cmp(&b.0));
+    groups
+}
+
+/// Intervals, one small histogram per nominal interval: how far each played interval was
+/// from its correct length (centre line), on a shared ms scale, with the count and the
+/// spread (sd); the ochre band is mean +/- sd. Returns the bottom y.
+fn intervals_section(p: &mut Paint, r: &ResultsState, x: f32, y: f32, w: f32) -> f32 {
+    let rep = &r.rep;
     p.serif(x, y, "Intervals", 22.0, col::TEXT, Align::Left);
     p.label_at(x + w - 64.0, y + 3.0, "evenness", Align::Right, col::DIM);
     p.serif(x + w - 56.0, y, format!("{:.0}", rep.spread_ms), 26.0, col::OCHRE, Align::Left);
     p.text(x + w, y + 4.0, "ms", 13.0, col::DIM, Align::Right);
-    const RANGE: f64 = 120.0;
+    let groups = interval_groups(rep, sixteenth_seconds(r.run.plan.bpm));
+    if groups.is_empty() {
+        p.text(x, y + 40.0, "\u{2013}", 14.0, col::FAINT, Align::Left);
+        return y + 60.0;
+    }
+    // Shared scale: wide enough for the 95th percentile of all errors, 60..120 ms.
+    let mut all: Vec<f64> = groups.iter().flat_map(|g| g.1.iter().map(|e| e.abs())).collect();
+    all.sort_by(f64::total_cmp);
+    let p95 = all[((all.len() - 1) as f64 * 0.95) as usize];
+    let range = ((p95 / 20.0).ceil() * 20.0).clamp(60.0, 120.0);
     const BIN: f64 = 5.0;
-    let nb = (2.0 * RANGE / BIN) as usize;
-    let mut bins = vec![0usize; nb];
-    for e in &errs {
-        let b = ((e + RANGE) / BIN).floor().clamp(0.0, nb as f64 - 1.0) as usize;
-        bins[b] += 1;
-    }
-    let maxb = bins.iter().copied().max().unwrap_or(0).max(1);
-    let (top, base) = (y + 34.0, y + 34.0 + h);
-    let xs = |ms: f64| x + w * ((ms.clamp(-RANGE, RANGE) + RANGE) / (2.0 * RANGE)) as f32;
-    let sd = rep.ioi_sd_ms;
-    if sd > 0.0 {
-        p.rect(xs(-sd), top, xs(sd) - xs(-sd), h, col::OCHRE_TINT);
-    }
-    let bw = w / nb as f32;
-    for (i, c) in bins.iter().enumerate() {
-        let hgt = (h - 8.0) * *c as f32 / maxb as f32;
-        if *c > 0 {
-            p.rect(x + i as f32 * bw + 1.0, base - hgt, bw - 2.0, hgt, col::DIM);
+    let nb = (2.0 * range / BIN) as usize;
+    const PER_ROW: usize = 3;
+    const GAP: f32 = 40.0;
+    const H: f32 = 90.0;
+    const ROW: f32 = 170.0;
+    let pw = (w - GAP * (PER_ROW - 1) as f32) / PER_ROW as f32;
+    for (gi, (nominal, errs)) in groups.iter().enumerate() {
+        let gx = x + (gi % PER_ROW) as f32 * (pw + GAP);
+        let gy = y + 40.0 + (gi / PER_ROW) as f32 * ROW;
+        let (m, sd) = (crate::dsp::mean(errs), crate::dsp::std(errs));
+        let name = interval_name(*nominal);
+        p.serif(gx, gy, &name, 19.0, col::TEXT, Align::Left);
+        p.text(gx + 10.0 + name.len() as f32 * 8.5, gy + 2.0, format!("\u{d7}{}", errs.len()), 12.0, col::DIM, Align::Left);
+        p.serif(gx + pw - 22.0, gy, format!("\u{b1}{sd:.0}"), 19.0, col::OCHRE, Align::Right);
+        p.text(gx + pw, gy + 2.0, "ms", 12.0, col::DIM, Align::Right);
+        let (top, base) = (gy + 18.0, gy + 18.0 + H);
+        let xs = |ms: f64| gx + pw * ((ms.clamp(-range, range) + range) / (2.0 * range)) as f32;
+        p.rect(xs(m - sd), top, xs(m + sd) - xs(m - sd), H, col::OCHRE_TINT);
+        let mut bins = vec![0usize; nb];
+        for e in errs {
+            bins[((e + range) / BIN).floor().clamp(0.0, nb as f64 - 1.0) as usize] += 1;
         }
-    }
-    p.hline(x, base, w, col::TEXT);
-    p.rect(xs(0.0) - 0.5, top, 1.0, h, col::LINE);
-    if sd > 0.0 {
-        for s in [-sd, sd] {
-            p.rect(xs(s) - 0.5, top - 6.0, 1.0, h + 6.0, col::OCHRE);
+        // At least 5 per full bar, so a handful of intervals doesn't look like a lot.
+        let maxb = bins.iter().copied().max().unwrap_or(0).max(5);
+        let bw = pw / nb as f32;
+        for (i, c) in bins.iter().enumerate() {
+            if *c > 0 {
+                let hgt = (H - 6.0) * *c as f32 / maxb as f32;
+                p.rect(gx + i as f32 * bw + 0.5, base - hgt, (bw - 1.0).max(1.0), hgt, col::DIM);
+            }
         }
-        p.serif(xs(sd) + 6.0, top + 4.0, format!("\u{b1}{sd:.0}"), 16.0, col::OCHRE, Align::Left);
+        p.hline(gx, base, pw, col::TEXT);
+        p.rect(xs(0.0) - 0.75, top - 4.0, 1.5, H + 4.0, col::TEXT);
+        let lbl = |v: f64| if v == 0.0 { "0".to_string() } else { format!("{v:+.0}").replace('-', "\u{2212}") };
+        p.text(gx, base + 13.0, lbl(-range), 11.0, col::DIM, Align::Left);
+        p.text(xs(0.0), base + 13.0, "0", 11.0, col::DIM, Align::Center);
+        p.text(gx + pw, base + 13.0, format!("{} ms", lbl(range)), 11.0, col::DIM, Align::Right);
     }
-    for t in [-120.0, -60.0, 0.0, 60.0, 120.0] {
-        let lbl = if t == 120.0 { "+120 ms".to_string() } else if t == 0.0 { "0".into() } else { format!("{t:+.0}").replace('-', "\u{2212}") };
-        let al = if t == -120.0 { Align::Left } else if t == 120.0 { Align::Right } else { Align::Center };
-        p.text(xs(t), base + 16.0, lbl, 11.0, col::DIM, al);
-    }
-    p.text(x, top - 2.0, format!("{} intervals", errs.len()), 11.0, col::FAINT, Align::Left);
+    y + 40.0 + groups.len().div_ceil(PER_ROW) as f32 * ROW
 }
