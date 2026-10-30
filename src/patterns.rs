@@ -43,9 +43,6 @@ pub fn pattern_by_id(id: &str) -> Option<&'static Pattern> {
     PATTERNS.iter().find(|p| p.id == id)
 }
 
-pub fn max_tier() -> u32 {
-    PATTERNS.iter().map(|p| p.tier).max().unwrap_or(1)
-}
 
 /// One note of a parsed bar.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]

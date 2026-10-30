@@ -22,6 +22,7 @@ pub enum AmpChoice {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ToneSettings {
     pub asset_dir: PathBuf,
     pub amp: AmpChoice,

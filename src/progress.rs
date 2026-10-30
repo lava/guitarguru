@@ -11,6 +11,9 @@ use crate::patterns::{BASE_BPM, BPM_MAX, BPM_MIN, BPM_STEP, PATTERNS, Pattern};
 pub const PASS_THRESHOLD: f64 = 80.0;
 
 pub fn data_dir() -> PathBuf {
+    if let Some(d) = std::env::var_os("GG_DATA_DIR") {
+        return PathBuf::from(d);
+    }
     directories::ProjectDirs::from("", "", "guitarguru")
         .map(|d| d.data_dir().to_path_buf())
         .unwrap_or_else(|| PathBuf::from(".guitarguru"))
@@ -25,6 +28,37 @@ pub struct Progress {
     pub unlocked: BTreeSet<String>,
     /// Best combined score per level.
     pub best: BTreeMap<String, f64>,
+    #[serde(default)]
+    pub history: Vec<HistoryEntry>,
+    /// Levels unlocked but not yet played (shown with a dot).
+    #[serde(default)]
+    pub fresh: BTreeSet<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct HistoryEntry {
+    pub key: String,
+    pub date: String,
+    pub combined: f64,
+    pub timing: f64,
+    pub tone: f64,
+    pub spread_ms: f64,
+    pub level_std_db: f64,
+    pub mean_offset_ms: Option<f64>,
+    pub misses: usize,
+    pub seconds: f64,
+}
+
+impl Progress {
+    pub fn history_for(&self, key: &str) -> Vec<&HistoryEntry> {
+        self.history.iter().filter(|h| h.key == key).collect()
+    }
+    pub fn best_entry(&self, key: &str) -> Option<&HistoryEntry> {
+        self.history_for(key).into_iter().max_by(|a, b| a.combined.total_cmp(&b.combined))
+    }
+    pub fn practice_seconds(&self) -> f64 {
+        self.history.iter().map(|h| h.seconds).sum()
+    }
 }
 
 impl Progress {
@@ -91,6 +125,7 @@ impl Progress {
             }
             for t in targets {
                 if self.unlocked.insert(t.clone()) {
+                    self.fresh.insert(t.clone());
                     newly.push(t);
                 }
             }

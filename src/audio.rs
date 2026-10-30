@@ -21,6 +21,7 @@ use crate::monitor::{Chain, ToneSettings};
 pub const SAMPLE_RATE: u32 = 48000;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AudioSettings {
     /// cpal device id string; None = auto (first device whose name contains "BANDFUSE",
     /// else the default input).
@@ -165,6 +166,7 @@ pub struct EngineInfo {
     pub output_label: String,
     pub input_buffer: String,
     pub output_buffer: String,
+    pub warning: Option<String>,
 }
 
 pub struct AudioEngine {
@@ -211,9 +213,36 @@ fn buffer_size(want: u32, sup: &cpal::SupportedBufferSize) -> cpal::BufferSize {
     }
 }
 
+enum InputHandle {
+    Device(cpal::Stream),
+    /// Synthesised guitar for headless testing (`GG_FAKE_INPUT=1`).
+    Fake(Arc<AtomicBool>),
+}
+
+impl Drop for InputHandle {
+    fn drop(&mut self) {
+        if let InputHandle::Fake(stop) = self {
+            stop.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
+enum OutputHandle {
+    Device(#[allow(dead_code)] cpal::Stream),
+    Fake(Arc<AtomicBool>),
+}
+
+impl Drop for OutputHandle {
+    fn drop(&mut self) {
+        if let OutputHandle::Fake(stop) = self {
+            stop.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
 struct Streams {
-    _input: cpal::Stream,
-    _output: cpal::Stream,
+    _input: InputHandle,
+    _output: OutputHandle,
 }
 
 impl AudioEngine {
@@ -344,7 +373,9 @@ fn build_streams(
     let mut input = None;
     let mut raw_tx = Some(raw_tx);
     let mut mon_tx = Some(mon_tx);
-    for dev in find_input(&host, s.input_device.as_deref()) {
+    let fake = std::env::var_os("GG_FAKE_INPUT").is_some();
+    let candidates = if fake { Vec::new() } else { find_input(&host, s.input_device.as_deref()) };
+    for dev in candidates {
         let Ok(cfgs) = dev.supported_input_configs() else { continue };
         let Some((cfg, bs)) = pick_config(cfgs.collect(), SAMPLE_RATE, s.input_channel + 1, 1) else {
             last_err = format!("{}: no {SAMPLE_RATE} Hz config with {} channels", device_label(&dev), s.input_channel + 1);
@@ -372,39 +403,59 @@ fn build_streams(
             }
         }
     }
-    let (in_stream, in_label, in_cfg) = input.ok_or(last_err)?;
+    let (in_stream, in_label, in_buffer) = if fake {
+        let state = InState { shared: Arc::clone(shared), raw: raw_tx.take().unwrap(), mon: mon_tx.take().unwrap(), scratch: vec![0.0; 16384], frame: 0 };
+        (InputHandle::Fake(spawn_fake_input(state)), "FAKE INPUT (synthesised eighths)".to_string(), "128".to_string())
+    } else {
+        let (st, label, cfg) = input.ok_or(last_err)?;
+        (InputHandle::Device(st), label, format!("{:?}", cfg.buffer_size))
+    };
+    let mut warning = None;
+    if !fake && s.input_device.is_none() && !in_label.contains("BANDFUSE") {
+        warning = Some("BANDFUSE adapter not found - using the default input; monitoring muted".to_string());
+        shared.monitor_on.store(false, Ordering::Relaxed);
+    }
 
-    let out_dev = match &s.output_device {
-        Some(id) => host
-            .output_devices()
-            .ok()
-            .and_then(|mut ds| ds.find(|d| device_id(d).as_deref() == Some(id)))
-            .or_else(|| host.default_output_device()),
-        None => host.default_output_device(),
+    let (out_handle, out_label, out_buffer) = if fake {
+        let st = OutState { shared: Arc::clone(shared), mon: mon_rx, frame: 0, scratch: vec![0.0; 16384] };
+        (OutputHandle::Fake(spawn_fake_output(st)), "FAKE OUTPUT (silent)".to_string(), "128".to_string())
+    } else {
+        let out_dev = match &s.output_device {
+            Some(id) => host
+                .output_devices()
+                .ok()
+                .and_then(|mut ds| ds.find(|d| device_id(d).as_deref() == Some(id)))
+                .or_else(|| host.default_output_device()),
+            None => host.default_output_device(),
+        }
+        .ok_or("no output device")?;
+        let cfgs = out_dev.supported_output_configs().map_err(|e| e.to_string())?;
+        let (cfg, bs) = pick_config(cfgs.collect(), SAMPLE_RATE, 1, 2).ok_or("output device: no 48 kHz config")?;
+        let mut sc: cpal::StreamConfig = cfg.config();
+        sc.buffer_size = buffer_size(s.buffer_frames, &bs);
+        let ch = sc.channels as usize;
+        let st = OutState { shared: Arc::clone(shared), mon: mon_rx, frame: 0, scratch: vec![0.0; 16384] };
+        let out_stream = match cfg.sample_format() {
+            cpal::SampleFormat::F32 => build_out::<f32>(&out_dev, sc.clone(), ch, st),
+            cpal::SampleFormat::I32 => build_out::<i32>(&out_dev, sc.clone(), ch, st),
+            _ => build_out::<i16>(&out_dev, sc.clone(), ch, st),
+        }
+        .map_err(|e| format!("output: {e}"))?;
+        out_stream.play().map_err(|e| format!("output play: {e}"))?;
+        (OutputHandle::Device(out_stream), device_label(&out_dev), format!("{:?}", sc.buffer_size))
+    };
+    if let InputHandle::Device(st) = &in_stream {
+        st.play().map_err(|e| format!("input play: {e}"))?;
     }
-    .ok_or("no output device")?;
-    let cfgs = out_dev.supported_output_configs().map_err(|e| e.to_string())?;
-    let (cfg, bs) = pick_config(cfgs.collect(), SAMPLE_RATE, 1, 2).ok_or("output device: no 48 kHz config")?;
-    let mut sc: cpal::StreamConfig = cfg.config();
-    sc.buffer_size = buffer_size(s.buffer_frames, &bs);
-    let ch = sc.channels as usize;
-    let st = OutState { shared: Arc::clone(shared), mon: mon_rx, frame: 0, scratch: vec![0.0; 16384] };
-    let out_stream = match cfg.sample_format() {
-        cpal::SampleFormat::F32 => build_out::<f32>(&out_dev, sc.clone(), ch, st),
-        cpal::SampleFormat::I32 => build_out::<i32>(&out_dev, sc.clone(), ch, st),
-        _ => build_out::<i16>(&out_dev, sc.clone(), ch, st),
-    }
-    .map_err(|e| format!("output: {e}"))?;
-    in_stream.play().map_err(|e| format!("input play: {e}"))?;
-    out_stream.play().map_err(|e| format!("output play: {e}"))?;
     let info = EngineInfo {
         sample_rate: SAMPLE_RATE,
         input_label: in_label,
-        output_label: device_label(&out_dev),
-        input_buffer: format!("{:?}", in_cfg.buffer_size),
-        output_buffer: format!("{:?}", sc.buffer_size),
+        output_label: out_label,
+        input_buffer: in_buffer,
+        warning,
+        output_buffer: out_buffer,
     };
-    Ok((Streams { _input: in_stream, _output: out_stream }, info))
+    Ok((Streams { _input: in_stream, _output: out_handle }, info))
 }
 
 struct InState {
@@ -418,7 +469,9 @@ struct InState {
 impl InState {
     fn block(&mut self, n: usize, stamp: u128) {
         let sh = &self.shared;
-        if let Ok(mut r) = sh.in_ref.try_lock() {
+        if stamp != 0
+            && let Ok(mut r) = sh.in_ref.try_lock()
+        {
             *r = Some(StampRef { frame: self.frame, nanos: stamp });
         }
         let x = &mut self.scratch[..n];
@@ -511,6 +564,82 @@ where
     }
 }
 
+/// Feeds synthesised palm-muted eighths, following the click plan (+15 ms, 6 ms jitter,
+/// every 13th note missed), through the normal input path. For headless testing.
+fn spawn_fake_input(mut st: InState) -> Arc<AtomicBool> {
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop2 = Arc::clone(&stop);
+    std::thread::spawn(move || {
+        let sr = f64::from(SAMPLE_RATE);
+        let block = 128usize;
+        let t0 = std::time::Instant::now();
+        let mut seed: u64 = 0x9e3779b97f4a7c15;
+        let mut rnd = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut next_hit: Option<(u64, f64)> = None; // (frame, amplitude)
+        let mut env = 0.0f64;
+        let mut tone_phase = 0.0f64;
+        let mut note_k: i64 = -1;
+        while !stop2.load(Ordering::Relaxed) {
+            let due = (t0.elapsed().as_secs_f64() * sr) as u64;
+            while st.frame + (block as u64) <= due {
+                let plan = st.shared.click.lock().ok().and_then(|c| *c);
+                for i in 0..block {
+                    let f = st.frame + i as u64;
+                    if let Some(p) = plan {
+                        let half = p.frames_per_beat / 2.0;
+                        let rel = f as f64 - p.start_frame as f64 - 0.015 * sr;
+                        let k = (rel / half).floor() as i64;
+                        if k > note_k && k >= 0 && (k as u32) < p.beats * 2 {
+                            note_k = k;
+                            if k % 13 != 12 {
+                                let jitter = ((0..6).map(|_| rnd()).sum::<f64>() - 3.0) * 0.006 * 1.41;
+                                let at = (p.start_frame as f64 + 0.015 * sr + k as f64 * half + jitter * sr).max(0.0) as u64;
+                                next_hit = Some((at.max(f), 0.12 * (1.0 + 0.1 * (rnd() - 0.5))));
+                            }
+                        }
+                    }
+                    if let Some((at, amp)) = next_hit
+                        && f >= at
+                    {
+                        env = amp;
+                        next_hit = None;
+                    }
+                    tone_phase += 82.4 / sr;
+                    let noise = rnd() * 2.0 - 1.0;
+                    let v = env * (0.6 * noise + 0.4 * (std::f64::consts::TAU * tone_phase).sin()) + 1e-4 * (rnd() - 0.5);
+                    env *= (-1.0 / (0.006 * sr)).exp();
+                    st.scratch[i] = v as f32;
+                }
+                st.block(block, 0);
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    });
+    stop
+}
+
+/// Real-time paced, silent output for headless testing.
+fn spawn_fake_output(mut st: OutState) -> Arc<AtomicBool> {
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop2 = Arc::clone(&stop);
+    std::thread::spawn(move || {
+        let t0 = std::time::Instant::now();
+        while !stop2.load(Ordering::Relaxed) {
+            let due = (t0.elapsed().as_secs_f64() * f64::from(SAMPLE_RATE)) as u64;
+            while st.frame + 128 <= due {
+                st.block(128, 0);
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    });
+    stop
+}
+
 struct OutState {
     shared: Arc<Shared>,
     mon: rtrb::Consumer<f32>,
@@ -546,7 +675,9 @@ pub fn render_click(plan: &ClickPlan, frame: u64, sr: f64) -> f32 {
 impl OutState {
     fn block(&mut self, n: usize, stamp: u128) {
         let sh = &self.shared;
-        if let Ok(mut r) = sh.out_ref.try_lock() {
+        if stamp != 0
+            && let Ok(mut r) = sh.out_ref.try_lock()
+        {
             *r = Some(StampRef { frame: self.frame, nanos: stamp });
         }
         let x = &mut self.scratch[..n];
