@@ -128,14 +128,15 @@ pub fn difficulty_note(now: f64, best: Option<&HistoryEntry>) -> Option<String> 
 pub enum Unlock {
     /// An ingredient of the player's choice, picked on the main menu.
     Token,
-    Tempo(Level),
+    /// A newly reached tempo (for every unlocked ingredient set).
+    Tempo(u32),
 }
 
 impl Unlock {
     pub fn label(&self) -> String {
         match self {
             Unlock::Token => "+ an ingredient".into(),
-            Unlock::Tempo(l) => format!("{} {}", l.name(), l.bpm),
+            Unlock::Tempo(b) => format!("{b} BPM"),
         }
     }
 }
@@ -226,7 +227,20 @@ impl Progress {
         self.ingredient_mask &= INGREDIENTS.iter().fold(0, |m, i| m | i.bit);
         self.xp_seen = self.xp_seen.min(self.xp);
         self.version = PROGRESS_VERSION;
-        self.fresh.retain(|k| Level::from_key(k).is_some() || k.starts_with("ingredient:"));
+        // Fresh tempos were per run (`mix:<set>@bpm`); they are per tempo now.
+        let old_fresh = std::mem::take(&mut self.fresh);
+        for k in old_fresh {
+            match Level::from_key(&k) {
+                Some(l) if l.is_run() => {
+                    self.fresh.insert(format!("tempo:{}", l.bpm));
+                }
+                Some(_) => {}
+                None if k.starts_with("ingredient:") || k.starts_with("tempo:") => {
+                    self.fresh.insert(k);
+                }
+                None => {}
+            }
+        }
     }
 
     pub fn save(&self) {
@@ -277,18 +291,16 @@ impl Progress {
         })
     }
 
-    /// (b, S) is open if every ingredient in S is unlocked and either b is the base tempo or
-    /// a passed run at b +/- 20 had a superset of S. Drills are open where the run with
-    /// their ingredients is.
+    /// Tempo and ingredients are independent: a tempo is reached when it is the base tempo,
+    /// was passed, or lies 20 BPM from a passed run with any ingredients.
+    pub fn tempo_reached(&self, bpm: u32) -> bool {
+        bpm == BASE_BPM || self.passed_runs().any(|(b, _)| b == bpm || b + BPM_STEP == bpm || bpm + BPM_STEP == b)
+    }
+
+    /// (b, S) is open if every ingredient in S is unlocked and tempo b is reached. Drills are
+    /// open where the run with their ingredients is.
     pub fn is_unlocked(&self, level: &Level) -> bool {
-        let mask = level.mask();
-        if mask & !self.unlocked_mask() != 0 {
-            return false;
-        }
-        if level.bpm == BASE_BPM {
-            return true;
-        }
-        self.passed_runs().any(|(b, m)| (b + BPM_STEP == level.bpm || level.bpm + BPM_STEP == b) && m & mask == mask)
+        level.mask() & !self.unlocked_mask() == 0 && self.tempo_reached(level.bpm)
     }
 
     pub fn best(&self, level: &Level) -> Option<f64> {
@@ -299,17 +311,17 @@ impl Progress {
         self.best(level).is_some_and(|b| b >= PASS_THRESHOLD)
     }
 
-    /// Record a result. Returns what it opened. Only runs unlock: tempos +/-20 for the run's
-    /// ingredient set (and its subsets), and an unlock token (an ingredient of the player's
+    /// Record a result. Returns what it opened. Only runs unlock: the tempos +/-20 (for every
+    /// unlocked ingredient set), and an unlock token (an ingredient of the player's
     /// choice) when the run had all unlocked ingredients active at >= 80 BPM. At most one
     /// token is pending at a time, so the next one again needs a pass with all of them.
     pub fn record(&mut self, level: &Level, combined: f64) -> Vec<Unlock> {
-        let before: Vec<Level> = self.neighbour_runs(level).into_iter().filter(|l| self.is_unlocked(l)).collect();
+        let before: Vec<u32> = neighbour_tempos(level.bpm).filter(|&b| self.tempo_reached(b)).collect();
         let best = self.best.entry(level.key()).or_insert(combined);
         if combined > *best {
             *best = combined;
         }
-        self.fresh.remove(&level.key());
+        self.fresh.remove(&format!("tempo:{}", level.bpm));
         let mut newly = Vec::new();
         let LevelKind::Run(mask) = level.kind else { return newly };
         if combined < PASS_THRESHOLD {
@@ -319,27 +331,19 @@ impl Progress {
             self.unlock_tokens = 1;
             newly.push(Unlock::Token);
         }
-        for l in self.neighbour_runs(level) {
-            if !before.contains(&l) && self.is_unlocked(&l) {
-                self.fresh.insert(l.key());
-                newly.push(Unlock::Tempo(l));
+        for b in neighbour_tempos(level.bpm) {
+            if !before.contains(&b) && self.tempo_reached(b) {
+                self.fresh.insert(format!("tempo:{b}"));
+                newly.push(Unlock::Tempo(b));
             }
         }
         newly
     }
+}
 
-    /// The same ingredient set at +/-20 BPM.
-    fn neighbour_runs(&self, level: &Level) -> Vec<Level> {
-        let m = level.mask();
-        let mut v = Vec::new();
-        if level.bpm + BPM_STEP <= BPM_MAX {
-            v.push(Level::run(m, level.bpm + BPM_STEP));
-        }
-        if level.bpm >= BPM_MIN + BPM_STEP {
-            v.push(Level::run(m, level.bpm - BPM_STEP));
-        }
-        v
-    }
+/// The tempos 20 BPM faster and slower, within range.
+fn neighbour_tempos(bpm: u32) -> impl Iterator<Item = u32> {
+    [bpm + BPM_STEP, bpm.saturating_sub(BPM_STEP)].into_iter().filter(move |&b| b != bpm && (BPM_MIN..=BPM_MAX).contains(&b))
 }
 
 #[cfg(test)]
@@ -361,7 +365,8 @@ mod tests {
         assert!(p.record(&Level::run(0, 80), 50.0).is_empty());
         // Passing basic at 80 (all unlocked ingredients = none) earns a token and opens 60/100.
         let newly = p.record(&Level::run(0, 80), 85.0);
-        assert_eq!(newly, vec![Unlock::Token, Unlock::Tempo(Level::run(0, 100)), Unlock::Tempo(Level::run(0, 60))]);
+        assert_eq!(newly, vec![Unlock::Token, Unlock::Tempo(100), Unlock::Tempo(60)]);
+        assert!(p.fresh.contains("tempo:100") && p.fresh.contains("tempo:60"));
         assert_eq!(p.unlock_tokens, 1);
         // One token at a time.
         assert!(!p.record(&Level::run(0, 80), 90.0).contains(&Unlock::Token));
@@ -374,7 +379,8 @@ mod tests {
         assert!(p.fresh.contains("ingredient:pm"));
         assert!(p.is_unlocked(&Level::run(PM, 80)) && !p.is_unlocked(&Level::run(SYNC, 80)));
         assert!(!p.is_unlocked(&Level::drill(offbeats, 80)), "offbeats need syncopation");
-        assert!(!p.is_unlocked(&Level::run(PM, 100)), "tempos open per ingredient set");
+        assert!(p.is_unlocked(&Level::run(PM, 100)) && p.is_unlocked(&Level::run(PM, 60)), "reached tempos open for any unlocked set");
+        assert!(!p.is_unlocked(&Level::run(PM, 120)), "120 not reached yet");
         // A run without all unlocked ingredients earns no token.
         let newly = p.record(&Level::run(0, 100), 90.0);
         assert!(!newly.contains(&Unlock::Token), "{newly:?}");
@@ -382,26 +388,40 @@ mod tests {
         assert!(p.record(&Level::run(PM, 80), 70.0).contains(&Unlock::Token));
         assert!(p.unlock_ingredient(0));
         assert_eq!(p.unlocked_mask(), PM | SYNC);
-        // Below 80 BPM never unlocks ingredients.
-        p.record(&Level::run(0, 60), 90.0);
-        assert!(p.record(&Level::run(SYNC, 60), 0.0).is_empty());
-        assert!(!p.is_unlocked(&Level::run(SYNC, 60)), "60 not open for syncopation yet");
+        // Below 80 BPM never earns a token.
+        assert_eq!(p.record(&Level::run(PM | SYNC, 60), 90.0), vec![Unlock::Tempo(40)]);
+        assert_eq!(p.unlock_tokens, 0);
+        // Syncopation at 120 opens 140 for every set.
+        p.record(&Level::run(0, 100), 90.0);
+        assert_eq!(p.record(&Level::run(SYNC, 120), 70.0), vec![Unlock::Tempo(140)]);
+        assert!(p.is_unlocked(&Level::run(PM, 140)) && p.is_unlocked(&Level::run(0, 140)));
     }
 
     #[test]
-    fn superset_runs_open_subset_tempos() {
+    fn tempos_are_independent_of_the_ingredient_set() {
         let mut p = Progress { ingredient_mask: SYNC | PM | S16 | LH, ..Progress::fresh() };
         p.record(&Level::run(PM | S16, 120), 85.0);
-        for m in [0, PM, S16, PM | S16] {
-            assert!(p.is_unlocked(&Level::run(m, 100)) && p.is_unlocked(&Level::run(m, 140)), "mask {m}");
+        for m in [0, PM, S16, LH, SYNC | LH, PM | S16 | LH] {
+            for b in [80, 100, 120, 140] {
+                assert!(p.is_unlocked(&Level::run(m, b)), "mask {m} at {b}");
+            }
+            assert!(!p.is_unlocked(&Level::run(m, 160)) && !p.is_unlocked(&Level::run(m, 60)), "only neighbours");
         }
-        assert!(!p.is_unlocked(&Level::run(LH, 140)), "LH was not part of the passed run");
-        assert!(!p.is_unlocked(&Level::run(PM | S16 | LH, 100)));
-        assert!(!p.is_unlocked(&Level::run(0, 160)), "only neighbours");
-        // An ingredient that is still locked keeps everything with it closed.
+        // A locked ingredient keeps everything with it closed.
         let p2 = Progress { ingredient_mask: SYNC | PM, best: p.best.clone(), ..Progress::fresh() };
         assert!(!p2.is_unlocked(&Level::run(S16, 100)));
-        assert!(p2.is_unlocked(&Level::run(PM, 100)));
+        assert!(p2.is_unlocked(&Level::run(SYNC | PM, 140)));
+        // Drills follow: the gallop (16ths + P.M.) is open wherever those are.
+        let gallop = crate::patterns::PATTERNS.iter().position(|q| q.id == "gallop").unwrap();
+        assert!(p.is_unlocked(&Level::drill(gallop, 140)) && !p2.is_unlocked(&Level::drill(gallop, 140)));
+    }
+
+    #[test]
+    fn fresh_run_keys_become_tempos() {
+        let mut p: Progress = serde_json::from_str(r#"{"version":2,"fresh":["mix:sync@100","ingredient:pm","gallop@120","junk"]}"#).unwrap();
+        p.migrate();
+        let f: Vec<&str> = p.fresh.iter().map(String::as_str).collect();
+        assert_eq!(f, vec!["ingredient:pm", "tempo:100"]);
     }
 
     #[test]

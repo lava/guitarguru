@@ -205,7 +205,7 @@ pub fn draw(g: &mut Game, p: &mut Paint, keys: &ButtonInput<KeyCode>, imgs: &Mas
             p.dashed_ring(x, cy, r, col::LINE);
             p.serif(x, cy - 2.0, format!("{b}"), 22.0, col::FAINT, Align::Center);
         }
-        if g.progress.fresh.contains(&l.key()) {
+        if g.progress.fresh.contains(&format!("tempo:{b}")) {
             p.disc(x + r * 0.75, cy - r * 0.75, 4.0, col::OCHRE);
         }
         let below = if !open {
