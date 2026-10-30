@@ -136,7 +136,8 @@ pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
                     }
                     for n in &next_pat.hits() {
                         let x = 600.0 + n.pos as f32 * 26.0;
-                        p.stroke_arrow(x, y + 30.0, 16.0, n.downstroke(), a(col::DIM));
+                        let c = if pm_on && n.pm { col::TONE } else { col::DIM };
+                        p.stroke_arrow(x, y + 30.0, 16.0, n.downstroke(), a(c));
                     }
                 }
             }
@@ -168,7 +169,8 @@ fn mix(a: Color, b: Color, k: f32) -> Color {
 }
 
 /// One bar on the 16th grid: serif "1 + 2 +" counts on top, a violet P.M. bracket over
-/// palm-muted notes, thin pick arrows for the played strokes (current in ochre); with `tab`
+/// palm-muted notes, thin pick arrows for the played strokes (current in ochre, palm-muted
+/// in violet); with `tab`
 /// six hairline strings with serif fret numbers below. Returns the bottom y.
 #[allow(clippy::too_many_arguments)]
 pub fn stroke_diagram(p: &mut Paint, pat: &Pattern, x0: f32, top: f32, cell: f32, arrow: f32, playhead: Option<f32>, pm_on: bool, tab: bool, alpha: f32) -> f32 {
@@ -204,6 +206,16 @@ pub fn stroke_diagram(p: &mut Paint, pat: &Pattern, x0: f32, top: f32, cell: f32
     }
     let arrow_y = top + 16.0 + arrow / 2.0;
     let active = |pos: f64, len: f64| playhead.is_some_and(|ph| ph >= pos as f32 && ph < (pos + len) as f32);
+    // Arrows: ochre while sounding, violet when palm-muted (like the P.M. bracket), else ink.
+    let arrow_col = |n: &crate::patterns::BarNote| {
+        if active(n.pos, n.len) {
+            col::OCHRE
+        } else if pm_on && n.pm {
+            col::TONE
+        } else {
+            col::TEXT
+        }
+    };
     let bottom;
     if tab {
         let names = ["e", "B", "G", "D", "A", "E"];
@@ -218,7 +230,7 @@ pub fn stroke_diagram(p: &mut Paint, pat: &Pattern, x0: f32, top: f32, cell: f32
         for (n, f) in hits.iter().zip(&fr) {
             let cx = x0 + n.pos as f32 * cell + cell / 2.0;
             let c = if active(n.pos, n.len) { col::OCHRE } else { col::TEXT };
-            p.stroke_arrow(cx, arrow_y, arrow * 0.7, n.downstroke(), a(c));
+            p.stroke_arrow(cx, arrow_y, arrow * 0.7, n.downstroke(), a(arrow_col(n)));
             let mut put = |s: u8, fret: u8| {
                 let y = string_y(s);
                 let w = if fret >= 10 { 22.0 } else { 14.0 };
@@ -234,8 +246,7 @@ pub fn stroke_diagram(p: &mut Paint, pat: &Pattern, x0: f32, top: f32, cell: f32
     } else {
         for n in &hits {
             let cx = x0 + n.pos as f32 * cell + cell / 2.0;
-            let c = if active(n.pos, n.len) { col::OCHRE } else { col::TEXT };
-            p.stroke_arrow(cx, arrow_y, arrow, n.downstroke(), a(c));
+            p.stroke_arrow(cx, arrow_y, arrow, n.downstroke(), a(arrow_col(n)));
         }
         bottom = arrow_y + arrow / 2.0 + 12.0;
     }
