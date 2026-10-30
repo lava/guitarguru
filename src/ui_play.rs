@@ -96,7 +96,7 @@ fn mix(a: Color, b: Color, k: f32) -> Color {
 }
 
 /// One bar on the 16th grid: count labels, then either stroke arrows (played down, played
-/// up, small faint ghost strokes) with duration bars, or with `tab` a six-string tab with
+/// up) with duration bars, or with `tab` a six-string tab with
 /// fret numbers and small pick arrows above. P.M. brackets mark palm-muted notes when
 /// `pm_on`. Optional playhead position in sixteenths. Drawn at reduced contrast.
 #[allow(clippy::too_many_arguments)]
@@ -173,14 +173,13 @@ fn stroke_diagram(p: &mut Paint, pat: &Pattern, x0: f32, top: f32, cell: f32, ar
             }
         }
     } else {
-        // Played notes: arrow at the onset plus a duration bar; ghost strokes (the hand
-        // moves but misses the strings on purpose): small faint arrows.
+        // Played notes only: arrow at the onset (alternate-picking direction) plus a
+        // duration bar. Ghost strokes stay in the data but are not drawn.
         for st in pat.strokes() {
             let x = x0 + st.pos as f32 * cell;
             let cx = x + cell / 2.0;
             if !st.played {
-                p.stroke_arrow(cx, gtop + 8.0 + arrow / 2.0, arrow * 0.42, st.down, col::LINE);
-                continue;
+                continue; // ghost strokes (unplayed hand motion) are not drawn
             }
             let len = hits.iter().find(|h| (h.pos - st.pos).abs() < 1e-6).map_or(1.0, |h| h.len) as f32;
             let active = playhead.is_some_and(|ph| ph >= st.pos as f32 && ph < st.pos as f32 + len);
