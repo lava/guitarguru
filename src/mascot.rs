@@ -3,14 +3,13 @@
 //! cycle per two beats, passing the middle of its travel (its fastest point) on every
 //! click with the turning points on the off-beat eighths; the head moves with it, wider
 //! on beat one. Phase comes from the caller's clock (the audio clock while playing). Five
-//! stages from serene to full metal.
+//! stages from serene to full metal, reached through XP (see `xp`).
 
 use std::collections::HashMap;
 
 use bevy::prelude::*;
 
 use crate::paint::Paint;
-use crate::patterns::{BPM_MIN, BPM_STEP};
 
 pub const STAGE_NAMES: [&str; 6] = ["", "Serene", "Plugged in", "Horns up", "Storm", "Full metal"];
 const LAYERS: [&str; 8] = ["back", "hairback", "fly", "torso", "head", "front", "arm", "over"];
@@ -38,15 +37,6 @@ impl Mood {
         }
     }
 }
-
-/// Stage from tempo and ingredients: points = BPM step (0..7) + 2 per active ingredient;
-/// stage = 1 + min(4, points / 3).
-pub fn stage_for(bpm: u32, ingredients: u32) -> u32 {
-    let step = bpm.saturating_sub(BPM_MIN) / BPM_STEP;
-    let points = step + 2 * ingredients;
-    1 + (points / 3).min(4)
-}
-
 
 #[derive(Resource)]
 pub struct MascotImages {
@@ -111,7 +101,14 @@ pub fn pose(stage: u32, beats: Option<f64>) -> Pose {
 
 /// Draw the guru with its top-left at (x, y), `scale` design px per viewBox unit.
 pub fn draw(p: &mut Paint, imgs: &MascotImages, x: f32, y: f32, scale: f32, stage: u32, mood: Mood, ps: &Pose) {
+    draw_faded(p, imgs, x, y, scale, stage, mood, ps, 1.0);
+}
+
+/// `draw` with every layer at `alpha` (for cross-fading between stages).
+#[allow(clippy::too_many_arguments)]
+pub fn draw_faded(p: &mut Paint, imgs: &MascotImages, x: f32, y: f32, scale: f32, stage: u32, mood: Mood, ps: &Pose, alpha: f32) {
     let s = stage.clamp(1, 5);
+    let tint = Color::WHITE.with_alpha(alpha);
     let to = |vx: f32, vy: f32| Vec2::new(x + vx * scale, y + vy * scale);
     let size = Vec2::new(VW * scale, VH * scale);
     let get = |l: &'static str| imgs.layers.get(&(s, mood, l));
@@ -127,7 +124,7 @@ pub fn draw(p: &mut Paint, imgs: &MascotImages, x: f32, y: f32, scale: f32, stag
         let rv = Vec2::new(v.x * th.cos() - v.y * th.sin(), v.x * th.sin() + v.y * th.cos());
         let pos = piv + rv + Vec2::new(0.0, dy);
         let anchor = Vec2::new(a.x / VW - 0.5, 0.5 - a.y / VH);
-        p.image(h, to(pos.x, pos.y), Vec2::new(size.x, size.y * sy), anchor, -th, Color::WHITE);
+        p.image(h, to(pos.x, pos.y), Vec2::new(size.x, size.y * sy), anchor, -th, tint);
     };
     let layer = |p: &mut Paint, l: &'static str, sy: f32, py: f32, rot_deg: f32, dy: f32| {
         layer_about(p, l, sy, py, rot_deg, dy, Vec2::new(120.0, 128.0));
@@ -145,7 +142,7 @@ pub fn draw(p: &mut Paint, imgs: &MascotImages, x: f32, y: f32, scale: f32, stag
     layer(p, "torso", 1.0, 128.0, 0.0, body_dy);
     layer(p, "head", ps.sy, 128.0, ps.rot_deg, head_dy);
     layer(p, "front", 1.0, 128.0, 0.0, body_dy);
-    if ps.guide {
+    if ps.guide && alpha >= 1.0 {
         click_guide(p, &to, body_dy);
     }
     layer_about(p, "arm", 1.0, ARM_PIVOT.y, ps.arm_deg, body_dy, ARM_PIVOT);
@@ -174,12 +171,6 @@ mod tests {
 
     #[test]
     fn stages() {
-        assert_eq!(stage_for(40, 0), 1);
-        assert_eq!(stage_for(80, 0), 1); // 2 points
-        assert_eq!(stage_for(100, 0), 2); // 3
-        assert_eq!(stage_for(120, 2), 3); // 4 + 4 = 8
-        assert_eq!(stage_for(160, 2), 4); // 6 + 4 = 10
-        assert_eq!(stage_for(180, 4), 5);
         let still = pose(5, None);
         assert_eq!(still.rot_deg, -12.0);
         assert_eq!(still.arm_deg, 0.0);

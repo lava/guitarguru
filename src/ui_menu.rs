@@ -1,12 +1,14 @@
-//! Main screen ("Guitar Guru" style): the guru reacting to the chosen tempo and
-//! ingredients, ingredient pills, a row of BPM circles with unlock lines, the Play button
-//! and a hairline drills list.
+//! Main menu ("Guitar Guru" style): the guru keeping time at the chosen tempo, his stage
+//! from XP with a small bar under him that fills after each run, ingredient pills (locked
+//! ones can be picked with an unlock token), a row of BPM circles with unlock lines, the
+//! Play button and a hairline drills list.
 
+use bevy::color::Alpha;
 use bevy::input::ButtonInput;
 use bevy::input::keyboard::KeyCode;
 
 use crate::game::{Game, Screen};
-use crate::mascot::{self, MascotImages, Mood};
+use crate::mascot::{self, MascotImages, Mood, STAGE_NAMES};
 use crate::paint::{Align, Font, Paint, col, fit};
 use crate::patterns::{BPM_MAX, BPM_MIN, BPM_STEP, INGREDIENTS, Level, LevelKind, PATTERNS, bpm_steps, drills};
 use crate::progress::PASS_THRESHOLD;
@@ -74,13 +76,10 @@ pub fn draw(g: &mut Game, p: &mut Paint, keys: &ButtonInput<KeyCode>, imgs: &Mas
         return;
     }
 
-    // ---------- the guru (left), a metronome at the selected tempo
+    // ---------- the guru (left), a metronome at the selected tempo, his stage from XP
     let mix = g.mix;
     let sel_bpm = g.selected.bpm;
-    let stage = mascot::stage_for(sel_bpm, mix.count_ones());
-    let beats = g.clock * f64::from(sel_bpm) / 60.0;
-    let pose = mascot::pose(stage, Some(beats));
-    mascot::draw(p, imgs, 220.0, 196.0, 1.15, stage, Mood::Neutral, &pose);
+    guru(g, p, imgs, sel_bpm);
 
     // ---------- songs to try (reached milestones), under the guru
     let songs = crate::songs::reached(&g.progress);
@@ -123,15 +122,28 @@ pub fn draw(g: &mut Game, p: &mut Paint, keys: &ButtonInput<KeyCode>, imgs: &Mas
                 g.progress.fresh.remove(&format!("ingredient:{}", ing.code));
                 g.selected = Level::run(g.mix, g.selected.bpm);
             }
+        } else if g.progress.unlock_tokens > 0 {
+            // An unlock to spend: every locked ingredient can be picked.
+            let hov = p.hover(x, y, w, h);
+            if hov {
+                p.rect(x, y, w, h, col::OCHRE_TINT);
+            }
+            p.dashed_frame(x, y, w, h, col::OCHRE);
+            p.dashed_ring(x + 24.0, y + h / 2.0, 6.0, col::OCHRE);
+            p.text(x + 40.0, y + h / 2.0 - 1.0, short, 16.0, col::DIM, Align::Left);
+            p.text(x + w / 2.0, y + h + 14.0, "click to unlock", 11.0, if hov { col::OCHRE } else { col::DIM }, Align::Center);
+            if p.hit(x, y, w, h) && g.progress.unlock_ingredient(i) {
+                g.progress.save();
+            }
         } else {
             p.dashed_frame(x, y, w, h, col::LINE);
             p.dashed_ring(x + 24.0, y + h / 2.0, 6.0, col::FAINT);
             p.text(x + 40.0, y + h / 2.0 - 1.0, short, 16.0, col::FAINT, Align::Left);
-            if hint.is_none() && i == g.progress.ingredients {
+            if hint.is_none() {
                 hint = Some(if unlocked_mask == 0 {
-                    format!("{} opens after a pass with the basic mix at 80+ BPM.", ing.name)
+                    "Pass the basic mix at 80+ BPM to unlock an ingredient of your choice.".to_string()
                 } else {
-                    format!("{} opens after a pass with {} at 80+ BPM.", ing.name, ingredient_list(unlocked_mask))
+                    format!("Pass with {} at 80+ BPM to unlock another ingredient of your choice.", ingredient_list(unlocked_mask))
                 });
             }
         }
@@ -304,5 +316,64 @@ pub fn draw(g: &mut Game, p: &mut Paint, keys: &ButtonInput<KeyCode>, imgs: &Mas
     }
     if let Some(m) = &g.message {
         p.text(RX, 620.0, m.clone(), 13.0, col::LATE, Align::Left);
+    }
+}
+
+/// The guru at the selected tempo, his stage from XP, with the XP bar under him. After a
+/// run the bar fills from the XP last shown to the current total; crossing a stage
+/// threshold cross-fades him into the next stage inside a widening gold ring.
+fn guru(g: &mut Game, p: &mut Paint, imgs: &MascotImages, bpm: u32) {
+    let (gx, gy, gs) = (220.0, 196.0, 1.15);
+    let (from, to) = (g.progress.xp_seen, g.progress.xp);
+    let shown = crate::xp::animate(from, to, g.clock - g.screen_since - 0.6);
+    if shown.done && from != to {
+        g.progress.xp_seen = to;
+        g.progress.save();
+    }
+    let stage = crate::xp::stage(shown.xp as u32);
+    let beats = g.clock * f64::from(bpm) / 60.0;
+    let mood = if shown.done { Mood::Neutral } else { Mood::Happy };
+    let (cx, cy) = (gx + 120.0 * gs, gy + 140.0 * gs);
+    match shown.stage_up {
+        Some((next, u)) => {
+            let u = u as f32;
+            for (k, delay) in [(0, 0.0f32), (1, 0.18)] {
+                let v = ((u - delay) / (1.0 - delay)).clamp(0.0, 1.0);
+                if v > 0.0 && v < 1.0 {
+                    let a = (1.0 - v) * 0.9;
+                    let r = 110.0 + 120.0 * v;
+                    if k == 0 {
+                        p.ring(cx, cy, r, col::GOLD.with_alpha(a));
+                    } else {
+                        p.dotted_ring(cx, cy, r, 1.2, col::GOLD.with_alpha(a));
+                    }
+                }
+            }
+            let fade_in = (u / 0.55).clamp(0.0, 1.0);
+            let fade_in = fade_in * fade_in * (3.0 - 2.0 * fade_in);
+            if fade_in < 1.0 {
+                mascot::draw(p, imgs, gx, gy, gs, stage, mood, &mascot::pose(stage, Some(beats)));
+            }
+            mascot::draw_faded(p, imgs, gx, gy, gs, next, mood, &mascot::pose(next, Some(beats)), fade_in);
+        }
+        None => mascot::draw(p, imgs, gx, gy, gs, stage, mood, &mascot::pose(stage, Some(beats))),
+    }
+
+    // The bar: a hairline track between two small gold diamonds, the fill in ochre.
+    let (bx, by, bw) = (cx - 96.0, 512.0, 192.0);
+    let full = shown.stage_up.is_some();
+    let f = if full { 1.0 } else { crate::xp::fill(shown.xp) as f32 };
+    p.rect(bx, by - 0.5, bw, 1.0, col::LINE);
+    p.rect(bx, by - 1.5, bw * f, 3.0, if stage >= crate::xp::MAX_STAGE { col::GOLD } else { col::OCHRE });
+    for x in [bx - 6.0, bx + bw + 6.0] {
+        p.rot_rect(x, by, 5.0, 5.0, std::f32::consts::FRAC_PI_4, col::GOLD);
+    }
+    let name_stage = shown.stage_up.map_or(stage, |(n, _)| n);
+    let name_col = if full { col::OCHRE } else { col::DIM };
+    p.label_at(bx - 8.0, by + 20.0, STAGE_NAMES[name_stage as usize], Align::Left, name_col);
+    if stage < crate::xp::MAX_STAGE {
+        let (a, b) = (crate::xp::STAGE_XP[stage as usize - 1], crate::xp::STAGE_XP[stage as usize]);
+        let have = if full { b - a } else { (shown.xp as u32).saturating_sub(a) };
+        p.text(bx + bw + 8.0, by + 20.0, format!("{have} / {} xp", b - a), 11.0, col::FAINT, Align::Right);
     }
 }

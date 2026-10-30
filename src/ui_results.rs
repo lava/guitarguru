@@ -93,9 +93,13 @@ pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
     p.serif(400.0, 318.0, format!("{shown:.0}"), 100.0, col::TEXT, Align::Center);
     p.serif(462.0, 340.0, "%", 26.0, col::TEXT, Align::Left);
     p.italic(405.0, 380.0, if pass { "passed" } else { "not yet" }, 26.0, if pass { col::ONTIME } else { col::LATE }, Align::Center);
+    if let Some(xp) = r.xp.filter(|x| *x > 0) {
+        p.text(405.0, 410.0, format!("+{xp} xp"), 13.0, col::DIM, Align::Center);
+    }
 
     // ---------- guru + verdict
-    let stage = mascot::stage_for(lvl.bpm, lvl.mask().count_ones());
+    // The stage the menu last showed: a stage-up is revealed back on the main menu.
+    let stage = crate::xp::stage(g.progress.xp_seen);
     let better = r.prev_best.as_ref().is_none_or(|b| rep.combined_pct > b.combined);
     let mood = if pass { Mood::Happy } else { Mood::Sad };
     mascot::draw(p, imgs, 760.0, 120.0, 0.62, stage, mood, &mascot::pose(stage, None));

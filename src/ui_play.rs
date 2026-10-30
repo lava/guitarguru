@@ -25,7 +25,6 @@ pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
         let total = play.plan.total_seconds();
         let start = play.plan.scoring_start();
         let waiting = play.waiting();
-        let mask = play.level.mask();
 
         // Time left: 4 px ochre bar anchored at the right edge.
         let left = if waiting || t < start { 1.0 } else { (1.0 - (t - start) / (total - start)).clamp(0.0, 1.0) as f32 };
@@ -62,7 +61,7 @@ pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
         // ---------- the guru keeps time (phase from the audio clock)
         let beats = t / beat_s;
         let running = t >= 0.0 && (waiting || t < total);
-        let stage = mascot::stage_for(bpm, mask.count_ones());
+        let stage = crate::xp::stage(g.progress.xp);
         let mut pose = mascot::pose(stage, running.then_some(beats));
         pose.guide = true;
         mascot::draw(p, imgs, 266.0, 168.0, 0.95, stage, Mood::Neutral, &pose);

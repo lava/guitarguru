@@ -68,6 +68,8 @@ pub struct ResultsState {
     pub calibration: bool,
     /// A song to try, suggested for the first time by this pass.
     pub song: Option<&'static crate::songs::Song>,
+    /// XP this run earned (None for calibration and saved runs).
+    pub xp: Option<u32>,
     /// Height of the results page as last drawn (design px).
     pub content_h: Option<f32>,
 }
@@ -248,6 +250,8 @@ impl Game {
             ended_early: None,
         });
         self.results = None;
+        // The menu's XP bar counts as caught up once a run starts.
+        self.progress.xp_seen = self.progress.xp;
         self.screen = Screen::Play;
     }
 
@@ -369,6 +373,7 @@ impl Game {
         let difficulty = run.avg_difficulty();
         let mut newly = Vec::new();
         let mut song = None;
+        let mut xp = None;
         if play.calibration {
             if rep.n_matched >= 6 {
                 self.cfg.latency_ms = Some(rep.latency_ms);
@@ -392,6 +397,9 @@ impl Game {
                 seconds: run.plan.total_seconds(),
                 difficulty: Some(difficulty),
             });
+            let gained = crate::xp::run_xp(&run.level, rep.combined_pct, run.plan.total_seconds());
+            self.progress.xp += gained;
+            xp = Some(gained);
             if run.level.is_run() {
                 self.progress.remember_patterns(&key, run.patterns_used().into_iter().map(|p| run.plan.patterns[p].id.to_string()).collect());
             }
@@ -409,6 +417,7 @@ impl Game {
             listening: None,
             calibration: play.calibration,
             song,
+            xp,
             content_h: None,
         });
         self.screen = Screen::Results;
@@ -439,6 +448,7 @@ impl Game {
             listening: None,
             calibration: false,
             song: None,
+            xp: None,
             content_h: None,
         });
         self.screen = Screen::Results;

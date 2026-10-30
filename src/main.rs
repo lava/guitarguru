@@ -19,6 +19,7 @@ mod ui_menu;
 mod ui_play;
 mod ui_results;
 mod ui_settings;
+mod xp;
 
 use bevy::prelude::*;
 use bevy::window::WindowResolution;

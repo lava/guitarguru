@@ -35,9 +35,22 @@ pub struct Progress {
     /// Newly opened runs / ingredients not yet played (shown with a dot).
     #[serde(default)]
     pub fresh: BTreeSet<String>,
-    /// How many ingredients (in `INGREDIENTS` order) are unlocked.
-    #[serde(default)]
+    /// Legacy (before version 2): how many ingredients, in `INGREDIENTS` order, were
+    /// unlocked. Migrated into `ingredient_mask`.
+    #[serde(default, skip_serializing)]
     pub ingredients: usize,
+    /// Unlocked ingredients (bit mask).
+    #[serde(default)]
+    pub ingredient_mask: u8,
+    /// Earned ingredient unlocks not yet spent (the player picks which ingredient).
+    #[serde(default)]
+    pub unlock_tokens: u32,
+    /// Experience from all finished runs (see `xp`).
+    #[serde(default)]
+    pub xp: u32,
+    /// XP the main menu's bar last showed; it fills from here to `xp` on the next visit.
+    #[serde(default)]
+    pub xp_seen: u32,
     /// Pattern ids of the last few runs per run key (newest last), so the next run of the
     /// same combination can pass over them.
     #[serde(default)]
@@ -50,8 +63,9 @@ pub struct Progress {
     pub version: u32,
 }
 
-/// Current `Progress::version`. 1: Syncopation became the first ingredient.
-pub const PROGRESS_VERSION: u32 = 1;
+/// Current `Progress::version`. 1: Syncopation became the first ingredient. 2: ingredients
+/// are a free choice (mask + unlock tokens); XP.
+pub const PROGRESS_VERSION: u32 = 2;
 
 /// Runs per combination whose patterns the next run avoids.
 pub const RECENT_RUNS: usize = 3;
@@ -112,14 +126,15 @@ pub fn difficulty_note(now: f64, best: Option<&HistoryEntry>) -> Option<String> 
 /// What opened up after a result.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Unlock {
-    Ingredient(usize),
+    /// An ingredient of the player's choice, picked on the main menu.
+    Token,
     Tempo(Level),
 }
 
 impl Unlock {
     pub fn label(&self) -> String {
         match self {
-            Unlock::Ingredient(i) => format!("+ {}", INGREDIENTS[*i].name),
+            Unlock::Token => "+ an ingredient".into(),
             Unlock::Tempo(l) => format!("{} {}", l.name(), l.bpm),
         }
     }
@@ -193,8 +208,24 @@ impl Progress {
             self.ingredients += 1;
             self.fresh.insert("ingredient:sync".into());
         }
+        // Version 2: the unlocked count becomes a mask, XP is seeded from the history (or
+        // from the passed bests when there is none) and shows as already seen.
+        if self.version < 2 {
+            self.ingredient_mask |= first_ingredients(self.ingredients.min(INGREDIENTS.len()));
+            self.xp = if self.history.is_empty() {
+                self.best
+                    .iter()
+                    .filter_map(|(k, v)| Some(crate::xp::run_xp(&Level::from_key(k)?, *v, crate::game::SCORED_SECONDS)))
+                    .sum()
+            } else {
+                self.history.iter().map(crate::xp::entry_xp).sum()
+            };
+            self.xp_seen = self.xp;
+        }
+        self.ingredients = 0;
+        self.ingredient_mask &= INGREDIENTS.iter().fold(0, |m, i| m | i.bit);
+        self.xp_seen = self.xp_seen.min(self.xp);
         self.version = PROGRESS_VERSION;
-        self.ingredients = self.ingredients.min(INGREDIENTS.len());
         self.fresh.retain(|k| Level::from_key(k).is_some() || k.starts_with("ingredient:"));
     }
 
@@ -212,11 +243,27 @@ impl Progress {
 
     /// Mask of the unlocked ingredients.
     pub fn unlocked_mask(&self) -> u8 {
-        first_ingredients(self.ingredients)
+        self.ingredient_mask
     }
 
     pub fn ingredient_unlocked(&self, i: usize) -> bool {
-        i < self.ingredients
+        self.ingredient_mask & INGREDIENTS[i].bit != 0
+    }
+
+    /// Are all ingredients unlocked?
+    pub fn all_ingredients(&self) -> bool {
+        INGREDIENTS.iter().all(|i| self.ingredient_mask & i.bit != 0)
+    }
+
+    /// Spend an unlock token on ingredient `i`. False if there is no token or it is open.
+    pub fn unlock_ingredient(&mut self, i: usize) -> bool {
+        if self.unlock_tokens == 0 || self.ingredient_unlocked(i) {
+            return false;
+        }
+        self.unlock_tokens -= 1;
+        self.ingredient_mask |= INGREDIENTS[i].bit;
+        self.fresh.insert(format!("ingredient:{}", INGREDIENTS[i].code));
+        true
     }
 
     /// Passed runs, as (bpm, ingredient mask).
@@ -253,8 +300,9 @@ impl Progress {
     }
 
     /// Record a result. Returns what it opened. Only runs unlock: tempos +/-20 for the run's
-    /// ingredient set (and its subsets), and the next ingredient when the run had all
-    /// unlocked ingredients active at >= 80 BPM.
+    /// ingredient set (and its subsets), and an unlock token (an ingredient of the player's
+    /// choice) when the run had all unlocked ingredients active at >= 80 BPM. At most one
+    /// token is pending at a time, so the next one again needs a pass with all of them.
     pub fn record(&mut self, level: &Level, combined: f64) -> Vec<Unlock> {
         let before: Vec<Level> = self.neighbour_runs(level).into_iter().filter(|l| self.is_unlocked(l)).collect();
         let best = self.best.entry(level.key()).or_insert(combined);
@@ -267,10 +315,9 @@ impl Progress {
         if combined < PASS_THRESHOLD {
             return newly;
         }
-        if mask == self.unlocked_mask() && level.bpm >= BASE_BPM && self.ingredients < INGREDIENTS.len() {
-            self.ingredients += 1;
-            self.fresh.insert(format!("ingredient:{}", INGREDIENTS[self.ingredients - 1].code));
-            newly.push(Unlock::Ingredient(self.ingredients - 1));
+        if mask == self.unlocked_mask() && level.bpm >= BASE_BPM && self.unlock_tokens == 0 && !self.all_ingredients() {
+            self.unlock_tokens = 1;
+            newly.push(Unlock::Token);
         }
         for l in self.neighbour_runs(level) {
             if !before.contains(&l) && self.is_unlocked(&l) {
@@ -312,17 +359,29 @@ mod tests {
         // Drills keep their own best but unlock nothing.
         assert!(p.record(&Level::drill(quarters, 80), 95.0).is_empty());
         assert!(p.record(&Level::run(0, 80), 50.0).is_empty());
-        // Passing basic at 80 (all unlocked ingredients = none) unlocks syncopation and 60/100.
+        // Passing basic at 80 (all unlocked ingredients = none) earns a token and opens 60/100.
         let newly = p.record(&Level::run(0, 80), 85.0);
-        assert_eq!(newly, vec![Unlock::Ingredient(0), Unlock::Tempo(Level::run(0, 100)), Unlock::Tempo(Level::run(0, 60))]);
-        assert_eq!(INGREDIENTS[0].bit, SYNC, "syncopation comes first");
-        assert!(p.is_unlocked(&Level::run(SYNC, 80)) && p.is_unlocked(&Level::drill(offbeats, 80)));
-        assert!(!p.is_unlocked(&Level::run(PM, 80)), "palm mutes come next");
-        assert!(!p.is_unlocked(&Level::run(SYNC, 100)), "tempos open per ingredient set");
-        // A run without all unlocked ingredients does not unlock the next one.
+        assert_eq!(newly, vec![Unlock::Token, Unlock::Tempo(Level::run(0, 100)), Unlock::Tempo(Level::run(0, 60))]);
+        assert_eq!(p.unlock_tokens, 1);
+        // One token at a time.
+        assert!(!p.record(&Level::run(0, 80), 90.0).contains(&Unlock::Token));
+        assert_eq!(p.unlock_tokens, 1);
+        // The player picks palm mutes first.
+        let pm = INGREDIENTS.iter().position(|i| i.bit == PM).unwrap();
+        assert!(p.unlock_ingredient(pm));
+        assert!(!p.unlock_ingredient(0), "no token left");
+        assert_eq!((p.unlock_tokens, p.unlocked_mask()), (0, PM));
+        assert!(p.fresh.contains("ingredient:pm"));
+        assert!(p.is_unlocked(&Level::run(PM, 80)) && !p.is_unlocked(&Level::run(SYNC, 80)));
+        assert!(!p.is_unlocked(&Level::drill(offbeats, 80)), "offbeats need syncopation");
+        assert!(!p.is_unlocked(&Level::run(PM, 100)), "tempos open per ingredient set");
+        // A run without all unlocked ingredients earns no token.
         let newly = p.record(&Level::run(0, 100), 90.0);
-        assert!(!newly.iter().any(|u| matches!(u, Unlock::Ingredient(_))), "{newly:?}");
-        assert_eq!(p.ingredients, 1);
+        assert!(!newly.contains(&Unlock::Token), "{newly:?}");
+        assert_eq!(p.unlock_tokens, 0);
+        assert!(p.record(&Level::run(PM, 80), 70.0).contains(&Unlock::Token));
+        assert!(p.unlock_ingredient(0));
+        assert_eq!(p.unlocked_mask(), PM | SYNC);
         // Below 80 BPM never unlocks ingredients.
         p.record(&Level::run(0, 60), 90.0);
         assert!(p.record(&Level::run(SYNC, 60), 0.0).is_empty());
@@ -331,7 +390,7 @@ mod tests {
 
     #[test]
     fn superset_runs_open_subset_tempos() {
-        let mut p = Progress { ingredients: 4, ..Progress::fresh() };
+        let mut p = Progress { ingredient_mask: SYNC | PM | S16 | LH, ..Progress::fresh() };
         p.record(&Level::run(PM | S16, 120), 85.0);
         for m in [0, PM, S16, PM | S16] {
             assert!(p.is_unlocked(&Level::run(m, 100)) && p.is_unlocked(&Level::run(m, 140)), "mask {m}");
@@ -340,9 +399,28 @@ mod tests {
         assert!(!p.is_unlocked(&Level::run(PM | S16 | LH, 100)));
         assert!(!p.is_unlocked(&Level::run(0, 160)), "only neighbours");
         // An ingredient that is still locked keeps everything with it closed.
-        let p2 = Progress { ingredients: 2, best: p.best.clone(), ..Progress::fresh() };
+        let p2 = Progress { ingredient_mask: SYNC | PM, best: p.best.clone(), ..Progress::fresh() };
         assert!(!p2.is_unlocked(&Level::run(S16, 100)));
         assert!(p2.is_unlocked(&Level::run(PM, 100)));
+    }
+
+    #[test]
+    fn version_1_files_keep_ingredients_and_seed_xp() {
+        let json = r#"{"version":1,"ingredients":2,"best":{"mix:sync@80":70.0},"history":[
+            {"key":"mix:basic@80","date":"","combined":70.0,"timing":0.0,"tone":0.0,"spread_ms":0.0,"level_std_db":0.0,"mean_offset_ms":null,"misses":0,"seconds":125.0},
+            {"key":"mix:sync@80","date":"","combined":40.0,"timing":0.0,"tone":0.0,"spread_ms":0.0,"level_std_db":0.0,"mean_offset_ms":null,"misses":0,"seconds":125.0}]}"#;
+        let mut p: Progress = serde_json::from_str(json).unwrap();
+        p.migrate();
+        assert_eq!(p.unlocked_mask(), SYNC | PM);
+        assert_eq!(p.unlock_tokens, 0);
+        assert_eq!(p.xp, 24 + 10);
+        assert_eq!(p.xp_seen, p.xp, "no fill animation for old XP");
+        let saved = serde_json::to_string(&p).unwrap();
+        assert!(!saved.contains("\"ingredients\""));
+        let mut again: Progress = serde_json::from_str(&saved).unwrap();
+        again.xp += 5;
+        again.migrate();
+        assert_eq!((again.unlocked_mask(), again.xp, again.xp_seen), (SYNC | PM, 39, 34), "migrates once");
     }
 
     #[test]
@@ -386,8 +464,11 @@ mod tests {
         assert_eq!(p.best.get("gallop@120"), Some(&77.0));
         assert!(!p.best.contains_key("triplet_gallop@80"));
         assert!(p.unlocked.is_empty());
-        assert_eq!(p.ingredients, INGREDIENTS.len());
+        assert!(p.all_ingredients());
         assert!(p.is_unlocked(&Level::run(0, 100)), "derived from the passed basic run at 80");
+        // No history: XP from the bests (basic 80 at 88 %, P.M. 80 at 70 %, gallop 120 at 77 %).
+        assert_eq!(p.xp, 28 + 30 + 57);
+        assert_eq!(p.xp_seen, p.xp);
     }
 
     #[test]
@@ -402,13 +483,13 @@ mod tests {
         assert_eq!(p.unlocked_mask(), SYNC | PM | S16);
         assert!(p.fresh.contains("ingredient:sync"));
         assert_eq!(p.best(&Level::run(PM | S16, 100)), Some(70.0));
-        assert_eq!(load(&serde_json::to_string(&p).unwrap()).ingredients, 3, "migrates once");
+        assert_eq!(load(&serde_json::to_string(&p).unwrap()).unlocked_mask(), SYNC | PM | S16, "migrates once");
         // Nothing unlocked yet: syncopation is the next one.
         let p = load(r#"{"best":{"mix:basic@80":40.0},"ingredients":0}"#);
-        assert_eq!(p.ingredients, 0);
+        assert_eq!(p.unlocked_mask(), 0);
         assert_eq!(p.version, PROGRESS_VERSION);
         // Everything unlocked stays everything.
-        assert_eq!(load(r#"{"ingredients":4}"#).ingredients, INGREDIENTS.len());
+        assert!(load(r#"{"ingredients":4}"#).all_ingredients());
         assert!(!Progress::fresh().fresh.contains("ingredient:sync"));
     }
 }
