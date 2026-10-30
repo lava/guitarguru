@@ -134,6 +134,9 @@ pub fn draw(g: &mut Game, p: &mut Paint, keys: &ButtonInput<KeyCode>, imgs: &Mas
             p.text(x + w / 2.0, y + h + 14.0, "click to unlock", 11.0, if hov { col::OCHRE } else { col::DIM }, Align::Center);
             if p.hit(x, y, w, h) && g.progress.unlock_ingredient(i) {
                 g.progress.save();
+                // Straight into the mix, at the selected tempo.
+                g.mix |= ing.bit;
+                g.selected = Level::run(g.mix, g.selected.bpm);
             }
         } else {
             p.dashed_frame(x, y, w, h, col::LINE);
