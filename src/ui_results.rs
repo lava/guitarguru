@@ -1,7 +1,7 @@
 //! Results ("Guitar Guru" style, scrollable): a 32-petal mandala whose petals fill to the
 //! score, the guru (happy or sad) with a short verdict, fact columns, the whole run (drift
-//! against the global offset, weak-spot pins, section letters), "Listen again" for the
-//! three weakest windows, the timing section (evenness headline, global offset, interval
+//! against the global offset, section letters, shaded bands over the problem passages),
+//! "Problem passages": listen-back of the three weakest windows, the timing section (evenness headline, global offset, interval
 //! errors per kind of interval, deviations, per-pattern slots) and the tone section (stroke
 //! envelopes per pick direction and P.M. group).
 
@@ -156,11 +156,11 @@ pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
     }
 
     // ---------- the whole run
-    run_timeline(p, r, 113.0, 580.0);
+    run_timeline(p, r, 113.0, 580.0, playing);
 
-    // ---------- listen again
+    // ---------- problem passages
     let ly = 830.0;
-    p.italic(113.0, ly, "Listen again", 34.0, col::TEXT, Align::Left);
+    p.italic(113.0, ly, "Problem passages", 34.0, col::TEXT, Align::Left);
     p.hline(113.0, ly + 24.0, 1130.0, col::LINE);
     for (i, w) in r.worst.iter().enumerate() {
         let x = 113.0 + i as f32 * 390.0;
@@ -336,7 +336,7 @@ fn listen_card(p: &mut Paint, r: &ResultsState, i: usize, w: &Window, x: f32, y:
     let rep = &r.rep;
     let run = &r.run;
     let mut act = None;
-    p.serif(x, y + 22.0, format!("{}", i + 1), 32.0, col::OCHRE, Align::Left);
+    p.serif(x, y + 22.0, format!("{}", i + 1), 32.0, PASSAGE, Align::Left);
     let glyph = if playing.is_some() { "stop" } else { "play" };
     if p.round_button(x + 52.0, y + 22.0, 20.0, glyph) {
         act = Some(if playing.is_some() { Action::StopListen } else { Action::Listen(i) });
@@ -352,7 +352,7 @@ fn listen_card(p: &mut Paint, r: &ResultsState, i: usize, w: &Window, x: f32, y:
     // progress line while playing
     p.hline(x, y + 58.0, cw, col::LINE);
     if let Some((pos, len)) = playing {
-        p.rect(x, y + 57.0, cw * pos as f32 / len.max(1) as f32, 2.0, col::OCHRE);
+        p.rect(x, y + 57.0, cw * pos as f32 / len.max(1) as f32, 2.0, PASSAGE);
     }
     p.label_at(x, y + 80.0, &format!("{} \u{b7} {}", letter_of(run, w.pattern), fit(&run.plan.patterns[w.pattern].name, 300.0, 13.0)), Align::Left, col::DIM);
     // notes: arrow row and coloured dot row on a 16th grid over the window
@@ -379,7 +379,7 @@ fn listen_card(p: &mut Paint, r: &ResultsState, i: usize, w: &Window, x: f32, y:
         let t = s0 + pos as f64 / f64::from(run.sample_rate);
         let ph = x + ((t - wstart) / six) as f32 * px16;
         if ph >= x && ph <= x + cw {
-            p.rect(ph - 0.75, y + 92.0, 1.5, 46.0, col::OCHRE);
+            p.rect(ph - 0.75, y + 92.0, 1.5, 46.0, PASSAGE);
         }
     }
     let mut cx = x;
@@ -527,7 +527,10 @@ fn timing_section(p: &mut Paint, r: &ResultsState, x: f32, y: f32) -> f32 {
 
 /// Drift over the whole run: the 11-note average of the deviations from the global offset
 /// with a jitter band, section letters (shaded when not A) and pins for the weak windows.
-fn run_timeline(p: &mut Paint, r: &ResultsState, x: f32, y: f32) {
+/// Problem passages: their numbers, shading and edges in this colour, here and on the cards.
+const PASSAGE: Color = col::LATE;
+
+fn run_timeline(p: &mut Paint, r: &ResultsState, x: f32, y: f32, playing: Option<(usize, usize)>) {
     let rep = &r.rep;
     let wy = y;
     p.serif(x, wy, "The whole run", 22.0, col::TEXT, Align::Left);
@@ -541,7 +544,8 @@ fn run_timeline(p: &mut Paint, r: &ResultsState, x: f32, y: f32) {
         let ys = |ms: f64| dy + dh / 2.0 - (ms.clamp(-120.0, 120.0) / 120.0) as f32 * dh / 2.0;
         // section shading (alternate patterns)
         let bar_s = bar_seconds(r.run.plan.bpm);
-        let st = r.run.plan.scoring_start() + r.run.grid_offset_s;
+        // Session time, like the notes' grid times.
+        let st = r.run.plan.scoring_start();
         let mut b = 0usize;
         while b < r.run.plan.bar_patterns.len() {
             let pat = r.run.plan.bar_patterns[b];
@@ -556,6 +560,27 @@ fn run_timeline(p: &mut Paint, r: &ResultsState, x: f32, y: f32) {
             p.italic(xa.max(dx) + 8.0, dy + 12.0, letter_of(&r.run, pat).to_string(), 14.0, col::DIM, Align::Left);
             b = e + 1;
         }
+        // Problem passages: the bars each covers, shaded, with its number above; stronger
+        // with a playhead while it plays back.
+        for (k, w) in r.worst.iter().enumerate() {
+            let (a, b) = (st + f64::from(w.start_bar) * bar_s, st + f64::from(w.start_bar + w.bars) * bar_s);
+            let (xa, xb) = (xs(a).max(dx), xs(b).min(dx + dw));
+            if xb <= xa {
+                continue;
+            }
+            let on = r.listening == Some(k) && playing.is_some();
+            p.rect(xa, dy, xb - xa, dh, PASSAGE.with_alpha(if on { 0.2 } else { 0.08 }));
+            p.rect(xa, dy, xb - xa, 2.0, PASSAGE.with_alpha(if on { 0.9 } else { 0.55 }));
+            p.rect(xa, dy + dh - 2.0, xb - xa, 2.0, PASSAGE.with_alpha(if on { 0.9 } else { 0.55 }));
+            p.serif((xa + xb) / 2.0, dy - 12.0, format!("{}", k + 1), 18.0, PASSAGE, Align::Center);
+            if on && let Some((pos, _)) = playing {
+                let t = r.run.window_span(w).0 + pos as f64 / f64::from(r.run.sample_rate);
+                let ph = xs(t);
+                if ph >= xa && ph <= xb {
+                    p.rect(ph - 0.75, dy, 1.5, dh, PASSAGE);
+                }
+            }
+        }
         let half = 5;
         let ma: Vec<f64> = (0..pts.len())
             .map(|i| crate::dsp::mean(&pts[i.saturating_sub(half)..(i + half + 1).min(pts.len())].iter().map(|q| q.1).collect::<Vec<_>>()))
@@ -568,17 +593,6 @@ fn run_timeline(p: &mut Paint, r: &ResultsState, x: f32, y: f32) {
         p.hline(dx, ys(0.0), dw, col::LINE);
         for i in 1..pts.len() {
             p.line(xs(pts[i - 1].0), ys(ma[i - 1]), xs(pts[i].0), ys(ma[i]), col::EARLY);
-        }
-        for (k, w) in r.worst.iter().enumerate() {
-            if let Some(&ni) = w.notes.first() {
-                let px = xs(rep.notes[ni].grid_time);
-                let mut yy = dy;
-                while yy < dy + dh {
-                    p.rect(px, yy, 1.0, 3.0, col::OCHRE);
-                    yy += 6.0;
-                }
-                p.text(px + 4.0, dy - 8.0, format!("{}", k + 1), 12.0, col::OCHRE, Align::Left);
-            }
         }
         p.text(dx, dy + dh + 16.0, "0:00", 11.0, col::DIM, Align::Left);
         let dur = t1 - t0;
