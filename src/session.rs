@@ -44,10 +44,20 @@ pub struct ClockLog {
 pub struct Window {
     pub start_bar: u32,
     pub bars: u32,
-    /// Mean error of the window (ms-equivalent; see `note_error`).
-    pub error: f64,
+    /// The window scored with the run's own formulas (timing from evenness, drift and
+    /// hits; tone from the attack-level spread), percent. Windows are ranked by it.
+    pub score_pct: f64,
+    /// Note-to-note evenness inside the window: sd(IOI error) / sqrt(2), ms (needs three
+    /// matched notes).
+    pub evenness_ms: Option<f64>,
+    /// Mean deviation from the run's global offset, ms (a steady offset in this window).
+    pub drift_ms: f64,
+    /// Attack-level spread after removing each slot's mean, count-weighted over the
+    /// palm-muted and open groups, dB.
+    pub level_sd_db: f64,
     /// Indices into `ScoreReport::notes`.
     pub notes: Vec<usize>,
+    pub n_missed: usize,
     pub n_extra: usize,
     /// Pattern played in this window (index into the plan's patterns); windows never span
     /// a switch.
@@ -128,11 +138,12 @@ impl RunData {
         if bar_seconds(self.plan.bpm) > 3.5 { 1 } else { 2 }
     }
 
-    /// The `n` worst non-overlapping windows by mean per-note error.
+    /// The `n` worst non-overlapping windows, scored like the whole run (see `Window`).
     pub fn worst_windows(&self, rep: &ScoreReport, onsets: &[Onset], n: usize) -> Vec<Window> {
+        use crate::score::{combined_pct, hit_factor, level_pct, timing_pct};
         let wb = self.window_bars();
         let nslots = self.slot_table().len().max(1);
-        // Mean level per slot, for tone error.
+        // Mean level per slot, as in the run's tone score.
         let mut slot_lv = vec![(0.0, 0usize); nslots];
         for note in &rep.notes {
             if let Some(l) = note.level_db {
@@ -141,13 +152,6 @@ impl RunData {
             }
         }
         let slot_mean: Vec<f64> = slot_lv.iter().map(|(s, c)| if *c > 0 { s / *c as f64 } else { 0.0 }).collect();
-        let note_err = |i: usize| {
-            let note = &rep.notes[i];
-            match (note.dev_ms, note.level_db) {
-                (Some(d), Some(l)) => d.abs() + 5.0 * (l - slot_mean[note.slot]).abs(),
-                _ => 60.0,
-            }
-        };
         let matched: std::collections::HashSet<u64> =
             rep.notes.iter().filter_map(|n| n.onset_time).map(f64::to_bits).collect();
         let quiet = rep.level_median_db - crate::score::EXTRA_LEVEL_MARGIN_DB;
@@ -177,12 +181,43 @@ impl RunData {
                     .iter()
                     .filter(|o| o.time >= t0 - w && o.time < t1 - w && !matched.contains(&o.time.to_bits()) && o.level_db >= quiet)
                     .count();
-                let err = (idx.iter().map(|&i| note_err(i)).sum::<f64>() + 30.0 * extra as f64) / idx.len() as f64;
-                cands.push(Window { start_bar: start, bars: wb, error: err, notes: idx, n_extra: extra, pattern: pat, pattern_id: self.plan.patterns[pat].id.to_string(), offset_ms });
+                let devs: Vec<f64> = idx.iter().filter_map(|&i| rep.notes[i].dev_ms).collect();
+                let ioi: Vec<f64> = devs.windows(2).map(|d| d[1] - d[0]).collect();
+                let enough = devs.len() >= 3;
+                let evenness_ms = enough.then(|| crate::dsp::std(&ioi) / std::f64::consts::SQRT_2);
+                let drift_ms = crate::dsp::mean(&devs);
+                let group_sd = |pm: bool| {
+                    let r: Vec<f64> = idx
+                        .iter()
+                        .filter(|&&i| rep.notes[i].pm == pm)
+                        .filter_map(|&i| rep.notes[i].level_db.map(|l| l - slot_mean[rep.notes[i].slot]))
+                        .collect();
+                    (crate::dsp::std(&r), r.len())
+                };
+                let ((pm_sd, n_pm), (open_sd, n_open)) = (group_sd(true), group_sd(false));
+                let level_sd_db = (n_pm as f64 * pm_sd + n_open as f64 * open_sd) / ((n_pm + n_open) as f64).max(1.0);
+                let hit = hit_factor(idx.len(), devs.len(), extra);
+                let timing = evenness_ms.map_or(0.0, |e| timing_pct(e, drift_ms.abs(), hit));
+                let tone = if enough { level_pct(pm_sd, n_pm, open_sd, n_open) } else { 0.0 };
+                cands.push(Window {
+                    start_bar: start,
+                    bars: wb,
+                    score_pct: combined_pct(timing, tone),
+                    evenness_ms,
+                    drift_ms,
+                    level_sd_db,
+                    n_missed: idx.len() - devs.len(),
+                    notes: idx,
+                    n_extra: extra,
+                    pattern: pat,
+                    pattern_id: self.plan.patterns[pat].id.to_string(),
+                    offset_ms,
+                });
             }
             start += 1;
         }
-        cands.sort_by(|a, b| b.error.partial_cmp(&a.error).unwrap_or(std::cmp::Ordering::Equal));
+        // Ties (several windows at 0 %) go to the one with more missed and extra notes.
+        cands.sort_by(|a, b| a.score_pct.total_cmp(&b.score_pct).then((b.n_missed + b.n_extra).cmp(&(a.n_missed + a.n_extra))));
         let mut out: Vec<Window> = Vec::new();
         for c in cands {
             if out.iter().all(|o| c.start_bar + c.bars <= o.start_bar || o.start_bar + o.bars <= c.start_bar) {
@@ -423,7 +458,7 @@ pub fn rescore_cli(paths: &[String]) {
         let name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
         match load_run(path) {
             Ok((run, old)) => {
-                let (rep, _) = run.analyse();
+                let (rep, onsets) = run.analyse();
                 let o = |k: &str| old.get(k).and_then(serde_json::Value::as_f64).unwrap_or(f64::NAN);
                 println!(
                     "{:<40} {:>5} {:>6.0} -> {:<4} {:>6.0} -> {:<4} {:>3.0} -> {:<3} {:>4.1} -> {:<4.1} {:>4.1} -> {:<4.1} {:>4.1} -> {:<4.1}",
@@ -435,10 +470,29 @@ pub fn rescore_cli(paths: &[String]) {
                     rep.spread_ms, rep.ioi_sd_ms, rep.drift_rms_ms, rep.latency_ms, rep.timing_pct, rep.tone_pct,
                     if rep.combined_pct >= crate::progress::PASS_THRESHOLD { "yes" } else { "no" }
                 );
+                println!("    onsets {}  close pairs (< 140 ms) {}", onsets.len(), close_pairs(&rep, &onsets).len());
+                for w in run.worst_windows(&rep, &onsets, 3) {
+                    let (s0, _) = run.window_span(&w);
+                    let t = s0 - run.plan.scoring_start() + beat_seconds(run.plan.bpm);
+                    println!(
+                        "    window bars {}-{} ({}:{:02}) {}: {:.0} %  evenness {} ms  drifted {:+.0} ms  missed {}  extra {}  attacks {:.1} dB",
+                        w.start_bar + 1, w.start_bar + w.bars, t as u32 / 60, t as u32 % 60, w.pattern_id, w.score_pct,
+                        w.evenness_ms.map_or("-".into(), |e| format!("{e:.0}")),
+                        w.drift_ms, w.n_missed, w.n_extra, w.level_sd_db
+                    );
+                }
             }
             Err(e) => println!("{name:<40} skipped: {e}"),
         }
     }
+}
+
+/// Onsets inside the scored span that follow the previous onset by less than 140 ms (a
+/// sign of double detections at the slow tempos the real takes use), as recording times.
+pub fn close_pairs(rep: &ScoreReport, onsets: &[Onset]) -> Vec<f64> {
+    let (Some(first), Some(last)) = (rep.notes.first(), rep.notes.last()) else { return Vec::new() };
+    let (lo, hi) = (first.grid_time + first.offset_ms / 1e3 - 0.1, last.grid_time + last.offset_ms / 1e3 + 0.1);
+    onsets.windows(2).filter(|w| w[1].time >= lo && w[1].time <= hi && w[1].time - w[0].time < 0.14).map(|w| w[1].time).collect()
 }
 
 #[cfg(test)]
@@ -540,26 +594,49 @@ mod tests {
     }
 
     /// Regression check on the real takes in the user's data dir (skipped if absent):
-    /// detections stay close to the number of notes and few extras are counted.
+    /// detections stay close to the number of notes and there are few double detections.
+    /// Extras aren't asserted in general: in some takes the player leaves the grid (the
+    /// 18:58 take plays steady ~0.5 s quarters against the 0.75 s grid for most of the run).
     #[test]
     #[ignore = "needs real runs in ~/.local/share/guitarguru/runs"]
     fn real_runs_rescore_sanely() {
         let dir = crate::progress::data_dir().join("runs");
         let Ok(rd) = std::fs::read_dir(&dir) else { return };
-        for e in rd.flatten() {
-            let p = e.path();
-            if p.extension().is_none_or(|x| x != "json") {
-                continue;
-            }
+        let mut paths: Vec<_> = rd.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "json")).collect();
+        paths.sort();
+        for p in paths {
             let Ok((run, _)) = load_run(&p) else { continue };
             let (rep, onsets) = run.analyse();
             if onsets.len() < 10 {
                 continue; // silent take
             }
-            println!("{}: grid {} onsets {} matched {} extra {} spread {:.1} wander {:.1} combined {:.1}",
-                p.display(), rep.n_grid, onsets.len(), rep.n_matched, rep.n_extra, rep.spread_ms, rep.wander_ms, rep.combined_pct);
+            let pairs = close_pairs(&rep, &onsets);
+            println!("{}: grid {} onsets {} matched {} extra {} pairs {} spread {:.1} combined {:.1}",
+                p.display(), rep.n_grid, onsets.len(), rep.n_matched, rep.n_extra, pairs.len(), rep.spread_ms, rep.combined_pct);
             assert!((onsets.len() as f64) < 1.3 * rep.n_grid as f64, "too many detections");
-            assert!(rep.n_extra * 3 < rep.n_grid, "too many extras");
+            assert!(pairs.len() * 10 < rep.n_grid, "too many close pairs: {pairs:?}");
         }
+    }
+
+    /// The take behind the phantom-notes report (dark open strings at 80 BPM): no double
+    /// detections, and the reported window (bars 27-28, q_and2) has no extra notes.
+    #[test]
+    #[ignore = "needs the 18:34 run in ~/.local/share/guitarguru/runs"]
+    fn real_run_1834_has_no_phantom_notes() {
+        let p = crate::progress::data_dir().join("runs/20261030-183434_mix:basic_80.json");
+        let Ok((run, _)) = load_run(&p) else { return };
+        let (rep, onsets) = run.analyse();
+        let pairs = close_pairs(&rep, &onsets);
+        assert!(pairs.len() <= 1, "close pairs at {pairs:?}");
+        assert!(rep.n_extra <= 15, "{} extras", rep.n_extra);
+        let win: Vec<usize> = (0..rep.notes.len()).filter(|&i| (26..28).contains(&run.plan.notes[i].bar)).collect();
+        let (t0, t1) = (rep.notes[win[0]].grid_time - 0.1, rep.notes[*win.last().unwrap()].grid_time + 0.6);
+        let matched: Vec<f64> = rep.notes.iter().filter_map(|n| n.onset_time).collect();
+        let extra: Vec<f64> = onsets
+            .iter()
+            .filter(|o| o.time > t0 && o.time < t1 && !matched.contains(&o.time) && o.level_db >= rep.level_median_db - crate::score::EXTRA_LEVEL_MARGIN_DB)
+            .map(|o| o.time)
+            .collect();
+        assert!(extra.len() <= 1, "extras in bars 27-28 at {extra:?}");
     }
 }

@@ -231,4 +231,45 @@ pub mod tests {
         let on = detect(&x, &DetectParams { sample_rate: sr, sixteenth: beat / 4.0, dynamic_range_db: 45.0 });
         assert_eq!(on.len(), hits.len(), "{:?}", on.iter().map(|o| o.time).collect::<Vec<_>>());
     }
+
+    /// The palm-muted reference takes the detector was first tuned on (skipped if absent):
+    /// nearly every grid note is found, with few unmatched detections.
+    #[test]
+    #[ignore = "needs reference takes"]
+    fn reference_takes_still_detect() {
+        let root = std::path::Path::new("reference-takes");
+        let Ok(sessions) = std::fs::read_dir(root) else { return };
+        for sess in sessions.flatten() {
+            let Ok(parts) = std::fs::read_dir(sess.path()) else { continue };
+            for part in parts.flatten().map(|e| e.path()).filter(|p| p.to_string_lossy().ends_with(" - Gtr I")) {
+                let Ok(text) = std::fs::read_to_string(part.join("grid.json")) else { continue };
+                let g: serde_json::Value = serde_json::from_str(&text).unwrap();
+                let s16 = g["bar_seconds"].as_f64().unwrap() / 16.0;
+                let mut grid: Vec<f64> = g["notes"].as_array().unwrap().iter().filter_map(|n| n["time"].as_f64()).collect();
+                grid.sort_by(f64::total_cmp);
+                grid.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+                let Ok(files) = std::fs::read_dir(part.join("Audio Files")) else { continue };
+                for wav in files.flatten().map(|e| e.path()).filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("Guitar DI_"))) {
+                    let mut r = hound::WavReader::open(&wav).unwrap();
+                    let (sr, ch) = (f64::from(r.spec().sample_rate), r.spec().channels as usize);
+                    let x: Vec<f32> = r.samples::<f32>().filter_map(Result::ok).step_by(ch).collect();
+                    let on = detect(&x, &DetectParams { sample_rate: sr, sixteenth: s16, dynamic_range_db: 45.0 });
+                    if on.len() < 10 {
+                        continue;
+                    }
+                    let g: Vec<f64> = grid.iter().copied().filter(|t| *t < x.len() as f64 / sr - 0.5).collect();
+                    let near = |t: f64| on.iter().map(|o| o.time - t).min_by(|a, b| a.abs().total_cmp(&b.abs())).unwrap();
+                    let mut d: Vec<f64> = g.iter().map(|&t| near(t)).filter(|d| d.abs() < 0.8 * s16).collect();
+                    d.sort_by(f64::total_cmp);
+                    let off = d[d.len() / 2];
+                    let matched = g.iter().filter(|&&t| (near(t + off)).abs() < 0.4 * s16).count();
+                    let span = |t: f64| t > g[0] + off - 0.4 * s16 && t < g[g.len() - 1] + off + 0.4 * s16;
+                    let inside = on.iter().filter(|o| span(o.time)).count();
+                    println!("{}: grid {} detected {} matched {}", wav.display(), g.len(), inside, matched);
+                    assert!(matched * 100 >= g.len() * 92, "missed too many");
+                    assert!(inside * 100 <= g.len() * 104, "too many detections");
+                }
+            }
+        }
+    }
 }

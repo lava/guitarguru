@@ -207,6 +207,41 @@ fn pct(x: f64) -> f64 {
     (x * 100.0).clamp(0.0, 100.0)
 }
 
+/// Evenness score: 10 ms -> 100 %, 40 ms -> 0 %.
+pub fn evenness_pct(spread_ms: f64) -> f64 {
+    pct((40.0 - spread_ms) / 30.0)
+}
+
+/// Drift score: 15 ms -> 100 %, 100 ms -> 0 %.
+pub fn drift_pct(drift_rms_ms: f64) -> f64 {
+    pct((100.0 - drift_rms_ms) / 85.0)
+}
+
+/// Share of the grid that counts as hit: extras cost half a miss each, capped at a
+/// quarter of the grid so a detector problem can't zero the score on its own.
+pub fn hit_factor(n_grid: usize, n_matched: usize, n_extra: usize) -> f64 {
+    if n_grid == 0 {
+        return 0.0;
+    }
+    let extra_pen = (0.5 * n_extra as f64).min(n_grid as f64 / 4.0);
+    (n_matched as f64 - extra_pen).max(0.0) / n_grid as f64
+}
+
+pub fn timing_pct(spread_ms: f64, drift_rms_ms: f64, hit: f64) -> f64 {
+    (0.75 * evenness_pct(spread_ms) + 0.25 * drift_pct(drift_rms_ms)) * hit
+}
+
+/// Level score from the palm-muted and open groups' spreads (dB) and note counts:
+/// palm-muted on a 1..4 dB scale, open on 2..7 dB, weighted by count.
+pub fn level_pct(pm_sd: f64, n_pm: usize, open_sd: f64, n_open: usize) -> f64 {
+    let (np, no) = (n_pm as f64, n_open as f64);
+    (np * pct((4.0 - pm_sd) / 3.0) + no * pct((7.0 - open_sd) / 5.0)) / (np + no).max(1.0)
+}
+
+pub fn combined_pct(timing: f64, tone: f64) -> f64 {
+    0.6 * timing + 0.4 * tone
+}
+
 pub fn score(inp: &ScoreInput) -> ScoreReport {
     let window = MATCH_WINDOW_SIXTEENTHS * inp.sixteenth;
     let grid = inp.grid;
@@ -388,25 +423,17 @@ pub fn score(inp: &ScoreInput) -> ScoreReport {
     };
 
     let enough = devs.len() >= 4;
-    // Extra notes cost half a miss each, but at most a quarter of the grid in total, so a
-    // detector problem can't zero the score on its own.
-    let extra_pen = (0.5 * rep.n_extra as f64).min(grid.len() as f64 / 4.0);
-    rep.hit_factor = if grid.is_empty() { 0.0 } else { (devs.len() as f64 - extra_pen).max(0.0) / grid.len() as f64 };
-    rep.spread_pct = if enough { pct((40.0 - rep.spread_ms) / 30.0) } else { 0.0 };
-    rep.drift_pct = if enough { pct((100.0 - rep.drift_rms_ms) / 85.0) } else { 0.0 };
-    rep.timing_pct = (0.75 * rep.spread_pct + 0.25 * rep.drift_pct) * rep.hit_factor;
-    // Level spread: palm-muted notes on a 1..4 dB scale, open notes on 2..7 dB, weighted
-    // by note count.
-    let pm_score = pct((4.0 - rep.pm.level_std_db) / 3.0);
-    let open_score = pct((7.0 - rep.open.level_std_db) / 5.0);
-    let (np, no) = (rep.pm.n as f64, rep.open.n as f64);
-    rep.level_pct = if enough { (np * pm_score + no * open_score) / (np + no).max(1.0) } else { 0.0 };
+    rep.hit_factor = hit_factor(grid.len(), devs.len(), rep.n_extra);
+    rep.spread_pct = if enough { evenness_pct(rep.spread_ms) } else { 0.0 };
+    rep.drift_pct = if enough { drift_pct(rep.drift_rms_ms) } else { 0.0 };
+    rep.timing_pct = if enough { timing_pct(rep.spread_ms, rep.drift_rms_ms, rep.hit_factor) } else { 0.0 };
+    rep.level_pct = if enough { level_pct(rep.pm.level_std_db, rep.pm.n, rep.open.level_std_db, rep.open.n) } else { 0.0 };
     rep.centroid_pct = rep.centroid_std_oct.map(|s| pct((0.5 - s) / 0.4));
     rep.tone_pct = match rep.centroid_pct {
         Some(c) => 0.75 * rep.level_pct + 0.25 * c,
         None => rep.level_pct,
     };
-    rep.combined_pct = 0.6 * rep.timing_pct + 0.4 * rep.tone_pct;
+    rep.combined_pct = combined_pct(rep.timing_pct, rep.tone_pct);
     rep
 }
 

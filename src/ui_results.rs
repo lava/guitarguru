@@ -284,28 +284,29 @@ fn count_name(pos16: f64) -> String {
     }
 }
 
-fn window_problems(rep: &ScoreReport, w: &Window) -> Vec<(String, Color)> {
-    let devs: Vec<f64> = w.notes.iter().filter_map(|&i| rep.notes[i].dev_ms).collect();
-    let lv: Vec<f64> = w.notes.iter().filter_map(|&i| rep.notes[i].level_db).collect();
-    let missed = w.notes.iter().filter(|&&i| rep.notes[i].onset_time.is_none()).count();
-    let mut out = Vec::new();
-    let m = crate::dsp::mean(&devs);
-    if m > 8.0 {
-        out.push((format!("late {m:+.0} ms"), col::LATE));
-    } else if m < -8.0 {
-        out.push((format!("early {m:+.0} ms"), col::EARLY));
+/// What went wrong in a window, worst first by what it cost the window's score: uneven
+/// intervals, a steady offset against the run's global offset ("drifted"), missed and
+/// extra notes, uneven attacks.
+fn window_problems(w: &Window) -> Vec<(String, Color)> {
+    let mut out: Vec<(f64, String, Color)> = Vec::new();
+    if let Some(e) = w.evenness_ms.filter(|e| *e > 15.0) {
+        out.push((0.75 * (e - 10.0) / 30.0, format!("uneven \u{b1}{e:.0} ms"), col::LATE));
     }
-    if missed > 0 {
-        out.push((format!("{missed} missed"), col::TEXT));
+    if w.drift_ms.abs() > 15.0 {
+        out.push((0.25 * (w.drift_ms.abs() - 15.0) / 85.0, format!("drifted {:+.0} ms", w.drift_ms), dev_color(w.drift_ms)));
+    }
+    let n = w.notes.len().max(1) as f64;
+    if w.n_missed > 0 {
+        out.push((w.n_missed as f64 / n, format!("{} missed", w.n_missed), col::TEXT));
     }
     if w.n_extra > 0 {
-        out.push((format!("{} extra", w.n_extra), col::DIM));
+        out.push((0.5 * w.n_extra as f64 / n, format!("{} extra", w.n_extra), col::DIM));
     }
-    let lsd = crate::dsp::std(&lv);
-    if lsd > 2.0 {
-        out.push((format!("uneven {lsd:.1} dB"), col::TONE));
+    if w.level_sd_db > 2.0 {
+        out.push((0.4 * (w.level_sd_db - 1.0) / 4.0, format!("attacks \u{b1}{:.1} dB", w.level_sd_db), col::TONE));
     }
-    out
+    out.sort_by(|a, b| b.0.total_cmp(&a.0));
+    out.into_iter().map(|(_, t, c)| (t, c)).collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -324,7 +325,7 @@ fn listen_card(p: &mut Paint, r: &ResultsState, i: usize, w: &Window, x: f32, y:
     p.serif(x + 86.0, y + 14.0, format!("{}\u{2013}{}", tf(s0 - st), tf(s1 - st)), 22.0, col::TEXT, Align::Left);
     let bars = if w.bars == 1 { format!("bar {}", w.start_bar + 1) } else { format!("bars {}\u{2013}{}", w.start_bar + 1, w.start_bar + w.bars) };
     p.text(x + 86.0, y + 36.0, bars, 12.0, col::DIM, Align::Left);
-    let wscore = (100.0 - 1.2 * w.error).clamp(0.0, 100.0);
+    let wscore = w.score_pct;
     p.serif(x + cw, y + 22.0, format!("{wscore:.0}"), 30.0, col::LATE, Align::Right);
     // progress line while playing
     p.hline(x, y + 58.0, cw, col::LINE);
@@ -360,7 +361,7 @@ fn listen_card(p: &mut Paint, r: &ResultsState, i: usize, w: &Window, x: f32, y:
         }
     }
     let mut cx = x;
-    for (txt, c) in window_problems(rep, w) {
+    for (txt, c) in window_problems(w) {
         p.disc(cx + 3.0, y + 156.0, 3.0, c);
         p.text(cx + 11.0, y + 155.0, &txt, 13.0, col::TEXT, Align::Left);
         cx += 22.0 + txt.len() as f32 * 7.0;
