@@ -118,7 +118,7 @@ pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
         // Main bar and next-pattern preview share one size; the tab view is taller, so
         // its bars start right below the click dot.
         let top = if tab { 492.0 } else { 520.0 };
-        let gap = if tab { 20.0 } else { 44.0 };
+        let gap = if tab { 30.0 } else { 44.0 };
         let cur_pat = &play.plan.patterns[cur];
         let playhead = if in_count_in { None } else { Some(pos16) };
         let bottom = stroke_diagram(p, cur_pat, BAR_X, top, BAR_CELL, BAR_ARROW, playhead, pm_on, tab, 1.0);
@@ -217,7 +217,7 @@ fn mix(a: Color, b: Color, k: f32) -> Color {
 
 /// One bar on the 16th grid: serif "1 + 2 +" counts on top, a violet P.M. bracket over
 /// palm-muted notes, thin pick arrows for the played strokes (current in ochre, palm-muted
-/// in violet); with `tab`
+/// in violet; small "v"/"^" marks in the tab view); with `tab`
 /// six hairline strings with serif fret numbers below. Returns the bottom y.
 #[allow(clippy::too_many_arguments)]
 pub fn stroke_diagram(p: &mut Paint, pat: &Pattern, x0: f32, top: f32, cell: f32, arrow: f32, playhead: Option<f32>, pm_on: bool, tab: bool, alpha: f32) -> f32 {
@@ -251,9 +251,10 @@ pub fn stroke_diagram(p: &mut Paint, pat: &Pattern, x0: f32, top: f32, cell: f32
             i = j + 1;
         }
     }
-    // The tab view draws shorter arrows (0.7) and keeps its rows tight, so that two bars
-    // (current and preview) fit below the click dot.
-    let arrow_y = top + 16.0 + if tab { arrow * 0.35 } else { arrow / 2.0 };
+    // The tab view marks pick directions with small "v"/"^" instead of arrows and keeps its
+    // rows tight, so that two bars (current and preview) fit below the click dot.
+    let mark_h = 10.0;
+    let arrow_y = top + 16.0 + if tab { mark_h / 2.0 + 2.0 } else { arrow / 2.0 };
     let active = |pos: f64, len: f64| playhead.is_some_and(|ph| ph >= pos as f32 && ph < (pos + len) as f32);
     // Arrows: ochre while sounding, violet when palm-muted (like the P.M. bracket), else ink.
     let arrow_col = |n: &crate::patterns::BarNote| {
@@ -269,7 +270,7 @@ pub fn stroke_diagram(p: &mut Paint, pat: &Pattern, x0: f32, top: f32, cell: f32
     if tab {
         let names = ["e", "B", "G", "D", "A", "E"];
         let sp = 16.0;
-        let s_top = arrow_y + arrow * 0.35 + 14.0;
+        let s_top = arrow_y + mark_h / 2.0 + 16.0;
         let string_y = |s: u8| s_top + f32::from(s - 1) * sp;
         for s in 1..=6u8 {
             p.styled(x0 - 13.0, string_y(s), names[s as usize - 1], 12.0, a(col::FAINT), Align::Center, Font::SerifItalic, 0.0);
@@ -279,7 +280,7 @@ pub fn stroke_diagram(p: &mut Paint, pat: &Pattern, x0: f32, top: f32, cell: f32
         for (n, f) in hits.iter().zip(&fr) {
             let cx = x0 + n.pos as f32 * cell + cell / 2.0;
             let c = if active(n.pos, n.len) { col::OCHRE } else { col::TEXT };
-            p.stroke_arrow(cx, arrow_y, arrow * 0.7, n.downstroke(), a(arrow_col(n)));
+            p.chevron(cx, arrow_y, 13.0, mark_h, n.downstroke(), a(arrow_col(n)));
             let mut put = |s: u8, fret: u8| {
                 let y = string_y(s);
                 let w = if fret >= 10 { 22.0 } else { 14.0 };

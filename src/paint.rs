@@ -253,6 +253,15 @@ impl Paint {
             self.line(cx - o, tip, cx + head * 0.62 - o, tip + dir * head, color);
         }
     }
+    /// Small pick-direction mark: "v" for a downstroke, "^" for an upstroke, `w` wide and
+    /// `h` tall around (`cx`, `cy`), in slightly thickened ink lines.
+    pub fn chevron(&mut self, cx: f32, cy: f32, w: f32, h: f32, down: bool, color: Color) {
+        let (tip, ends) = if down { (cy + h / 2.0, cy - h / 2.0) } else { (cy - h / 2.0, cy + h / 2.0) };
+        for o in [-0.5f32, 0.0, 0.5] {
+            self.line(cx - w / 2.0 + o, ends, cx + o, tip, color);
+            self.line(cx + w / 2.0 + o, ends, cx + o, tip, color);
+        }
+    }
     pub fn cross(&mut self, cx: f32, cy: f32, r: f32, color: Color) {
         self.line(cx - r, cy - r, cx + r, cy + r, color);
         self.line(cx - r, cy + r, cx + r, cy - r, color);
