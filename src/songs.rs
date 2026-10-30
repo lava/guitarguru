@@ -2,8 +2,8 @@
 //! a promise that the player can now play them (tempos and tunings differ).
 //!
 //! An entry is reached by passing a run at `min_bpm` or faster whose ingredients include
-//! `needs` (drills don't count), or, for gallop entries, by passing the gallop drill at
-//! `min_bpm` or faster. Each suggestion is shown once on the results screen (remembered in
+//! `needs`; the quarters and alternate-eighths drills count for the basic entries, and
+//! gallop entries are reached by passing the gallop drill at `min_bpm` or faster. Each suggestion is shown once on the results screen (remembered in
 //! `Progress::songs_shown`); the main screen lists every reached one.
 
 use crate::patterns::{LH, Level, LevelKind, PATTERNS, PM, S16, SYNC, TREM};
@@ -68,7 +68,11 @@ impl Song {
             return false;
         }
         match level.kind {
-            LevelKind::Drill(p) => self.gallop && PATTERNS[p].id == "gallop",
+            LevelKind::Drill(p) => match PATTERNS[p].id.as_ref() {
+                "gallop" => self.gallop,
+                "quarters" | "alt_eighths" => !self.gallop && self.needs == 0,
+                _ => false,
+            },
             LevelKind::Run(m) => !self.gallop && m & self.needs == self.needs,
         }
     }
@@ -103,9 +107,12 @@ mod tests {
         assert!(suggest(&mut p, &basic80).is_none(), "each appears once");
         // A palm-mute run at 100 also reaches the basic eighths entries first.
         assert_eq!(suggest(&mut p, &Level::run(PM | SYNC, 100)).map(|s| s.title), Some("My Own Summer (Shove It)"));
-        // Drills only reach gallop entries, and only the gallop drill.
+        // The gallop drill reaches gallop entries; the quarters and alternate-eighths drills
+        // count for basic ones only.
         let idx = |id: &str| PATTERNS.iter().position(|q| q.id == id).unwrap();
-        assert!(suggest(&mut p, &Level::drill(idx("quarters"), 180)).is_none());
+        assert_eq!(suggest(&mut p, &Level::drill(idx("quarters"), 100)).map(|s| s.title), Some("Square Hammer"));
+        assert_eq!(suggest(&mut p, &Level::drill(idx("alt_eighths"), 180)).map(|s| s.title), Some("Guardians of Asgaard"));
+        assert!(suggest(&mut p, &Level::drill(idx("quarters"), 180)).is_none(), "basic entries used up");
         assert!(suggest(&mut p, &Level::drill(idx("gallop"), 80)).is_none(), "too slow");
         assert_eq!(suggest(&mut p, &Level::drill(idx("gallop"), 140)).map(|s| s.artist), Some("Powerwolf"));
         assert_eq!(suggest(&mut p, &Level::drill(idx("gallop"), 140)).map(|s| s.title), Some("The Pursuit of Vikings"));
