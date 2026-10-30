@@ -130,7 +130,7 @@ pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
                     p.rect(lx, y + 44.0, lw, 1.0, a(col::LINE));
                     p.rect(lx + lw * (1.0 - f), y + 43.5, lw * f, 2.0, a(col::OCHRE));
                     // Count above, then small arrows of the next pattern (played strokes only).
-                    for k in 0..16 {
+                    for k in (0..16).step_by(2) {
                         let c = if k % 4 == 0 { col::DIM } else { col::FAINT };
                         p.serif(600.0 + k as f32 * 26.0, y + 2.0, count_label(k), if k % 4 == 0 { 13.0 } else { 11.0 }, a(c), Align::Center);
                     }
@@ -167,18 +167,18 @@ fn mix(a: Color, b: Color, k: f32) -> Color {
     Color::srgb(a.red + (b.red - a.red) * k, a.green + (b.green - a.green) * k, a.blue + (b.blue - a.blue) * k)
 }
 
-/// One bar on the 16th grid: serif "1 e + a" labels on top, a violet P.M. bracket over
+/// One bar on the 16th grid: serif "1 + 2 +" counts on top, a violet P.M. bracket over
 /// palm-muted notes, thin pick arrows for the played strokes (current in ochre); with `tab`
 /// six hairline strings with serif fret numbers below. Returns the bottom y.
 #[allow(clippy::too_many_arguments)]
 pub fn stroke_diagram(p: &mut Paint, pat: &Pattern, x0: f32, top: f32, cell: f32, arrow: f32, playhead: Option<f32>, pm_on: bool, tab: bool, alpha: f32) -> f32 {
     let a = |c: Color| c.with_alpha(alpha);
     let hits = pat.hits();
-    // Count labels
-    let cur16 = playhead.map(|ph| ph.floor() as i32);
-    for k in 0..16 {
+    // Counts on the eighths only (no "e"/"a"); the current eighth's count lights up.
+    let cur8 = playhead.map(|ph| (ph / 2.0).floor() as i32);
+    for k in (0..16).step_by(2) {
         let x = x0 + k as f32 * cell + cell / 2.0;
-        let c = if cur16 == Some(k) { col::OCHRE } else if k % 4 == 0 { col::TEXT } else { col::FAINT };
+        let c = if cur8 == Some(k / 2) { col::OCHRE } else if k % 4 == 0 { col::TEXT } else { col::FAINT };
         p.serif(x, top + 8.0, count_label(k), if k % 4 == 0 { 17.0 } else { 14.0 }, a(c), Align::Center);
     }
     let label_top = top;
@@ -246,14 +246,9 @@ pub fn stroke_diagram(p: &mut Paint, pat: &Pattern, x0: f32, top: f32, cell: f32
     bottom
 }
 
-/// "1 e + a" label of a sixteenth within the bar.
+/// Count of an eighth within the bar ("1 + 2 +"), by its sixteenth `k` (even).
 fn count_label(k: i32) -> String {
-    match k % 4 {
-        0 => format!("{}", k / 4 + 1),
-        1 => "e".into(),
-        2 => "+".into(),
-        _ => "a".into(),
-    }
+    if k % 4 == 0 { format!("{}", k / 4 + 1) } else { "+".into() }
 }
 
 /// Click-dot flash, `since` seconds after a click: full colour for up to 50 ms, then a
