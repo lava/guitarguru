@@ -45,16 +45,16 @@ pub struct Window {
     pub start_bar: u32,
     pub bars: u32,
     /// The window scored with the run's own formulas (timing from evenness, drift and
-    /// hits; tone from the attack-level spread), percent. Windows are ranked by it.
+    /// hits; tone from the stroke feature spreads), percent. Windows are ranked by it.
     pub score_pct: f64,
     /// Note-to-note evenness inside the window: sd(IOI error) / sqrt(2), ms (needs three
     /// matched notes).
     pub evenness_ms: Option<f64>,
     /// Mean deviation from the run's global offset, ms (a steady offset in this window).
     pub drift_ms: f64,
-    /// Attack-level spread after removing each slot's mean, count-weighted over the
-    /// palm-muted and open groups, dB.
-    pub level_sd_db: f64,
+    /// Spread of each tone feature (`tone::Feature::ALL` order) over the window's strokes,
+    /// each taken relative to its group's mean.
+    pub tone_sd: [Option<f64>; 4],
     /// Indices into `ScoreReport::notes`.
     pub notes: Vec<usize>,
     pub n_missed: usize,
@@ -105,8 +105,19 @@ impl RunData {
     pub fn score_onsets(&self, onsets: &[Onset]) -> ScoreReport {
         let table = self.slot_table();
         let flat = |p: usize, s: usize| table.iter().position(|&e| e == (p, s)).unwrap_or(0);
-        let grid: Vec<GridIn> =
-            self.plan.notes.iter().map(|n| GridIn { time: n.time + self.grid_offset_s, slot: flat(n.pattern, n.slot), pm: n.pm }).collect();
+        let grid: Vec<GridIn> = self
+            .plan
+            .notes
+            .iter()
+            .map(|n| GridIn {
+                time: n.time + self.grid_offset_s,
+                slot: flat(n.pattern, n.slot),
+                pm: n.pm,
+                down: self.plan.patterns[n.pattern].hits().get(n.slot).is_none_or(|h| h.downstroke()),
+                midi: n.midi,
+                string: n.fretting.string,
+            })
+            .collect();
         let min_len = self
             .patterns_used()
             .iter()
@@ -140,18 +151,8 @@ impl RunData {
 
     /// The `n` worst non-overlapping windows, scored like the whole run (see `Window`).
     pub fn worst_windows(&self, rep: &ScoreReport, onsets: &[Onset], n: usize) -> Vec<Window> {
-        use crate::score::{combined_pct, hit_factor, level_pct, timing_pct};
+        use crate::score::{combined_pct, hit_factor, timing_pct};
         let wb = self.window_bars();
-        let nslots = self.slot_table().len().max(1);
-        // Mean level per slot, as in the run's tone score.
-        let mut slot_lv = vec![(0.0, 0usize); nslots];
-        for note in &rep.notes {
-            if let Some(l) = note.level_db {
-                slot_lv[note.slot].0 += l;
-                slot_lv[note.slot].1 += 1;
-            }
-        }
-        let slot_mean: Vec<f64> = slot_lv.iter().map(|(s, c)| if *c > 0 { s / *c as f64 } else { 0.0 }).collect();
         let matched: std::collections::HashSet<u64> =
             rep.notes.iter().filter_map(|n| n.onset_time).map(f64::to_bits).collect();
         let quiet = rep.level_median_db - crate::score::EXTRA_LEVEL_MARGIN_DB;
@@ -186,26 +187,17 @@ impl RunData {
                 let enough = devs.len() >= 3;
                 let evenness_ms = enough.then(|| crate::dsp::std(&ioi) / std::f64::consts::SQRT_2);
                 let drift_ms = crate::dsp::mean(&devs);
-                let group_sd = |pm: bool| {
-                    let r: Vec<f64> = idx
-                        .iter()
-                        .filter(|&&i| rep.notes[i].pm == pm)
-                        .filter_map(|&i| rep.notes[i].level_db.map(|l| l - slot_mean[rep.notes[i].slot]))
-                        .collect();
-                    (crate::dsp::std(&r), r.len())
-                };
-                let ((pm_sd, n_pm), (open_sd, n_open)) = (group_sd(true), group_sd(false));
-                let level_sd_db = (n_pm as f64 * pm_sd + n_open as f64 * open_sd) / ((n_pm + n_open) as f64).max(1.0);
+                let tone_sd = crate::tone::window_spreads(&rep.tone, &idx);
                 let hit = hit_factor(idx.len(), devs.len(), extra);
                 let timing = evenness_ms.map_or(0.0, |e| timing_pct(e, drift_ms.abs(), hit));
-                let tone = if enough { level_pct(pm_sd, n_pm, open_sd, n_open) } else { 0.0 };
+                let tone = if enough { crate::tone::features_pct(&tone_sd).unwrap_or(rep.tone_pct) } else { 0.0 };
                 cands.push(Window {
                     start_bar: start,
                     bars: wb,
                     score_pct: combined_pct(timing, tone),
                     evenness_ms,
                     drift_ms,
-                    level_sd_db,
+                    tone_sd,
                     n_missed: idx.len() - devs.len(),
                     notes: idx,
                     n_extra: extra,
@@ -300,9 +292,10 @@ impl RunData {
         }
         #[derive(Serialize)]
         struct Out<'a> {
-            /// 3: `patterns` hold full definitions and `seed` the run's draw. Earlier files
-            /// have no format (2: `patterns`/`bar_patterns` ids of built-in patterns, 1: one
-            /// `pattern` id).
+            /// 4: `report.tone` holds the stroke-tone groups and features (`worst_windows`
+            /// have `tone_sd`). 3: `patterns` hold full definitions and `seed` the run's
+            /// draw. Earlier files have no format (2: `patterns`/`bar_patterns` ids of
+            /// built-in patterns, 1: one `pattern` id).
             format: u32,
             level: String,
             level_name: String,
@@ -331,7 +324,7 @@ impl RunData {
         }
         let pats = &self.plan.patterns;
         let out = Out {
-            format: 3,
+            format: 4,
             level: self.level.key(),
             level_name: self.level.name(),
             seed: self.plan.seed,
@@ -469,15 +462,25 @@ pub fn rescore_cli(paths: &[String]) {
                     rep.spread_ms, rep.ioi_sd_ms, rep.drift_rms_ms, rep.latency_ms, rep.timing_pct, rep.tone_pct,
                     if rep.combined_pct >= crate::progress::PASS_THRESHOLD { "yes" } else { "no" }
                 );
-                println!("    onsets {}  close pairs (< 140 ms) {}", onsets.len(), close_pairs(&rep, &onsets).len());
+                println!("    onsets {}  close pairs (< 140 ms) {}  tone {:.1} -> {:.1}", onsets.len(), close_pairs(&rep, &onsets).len(), o("tone_pct"), rep.tone_pct);
+                for g in &rep.tone.groups {
+                    let f: Vec<String> = crate::tone::Feature::ALL
+                        .iter()
+                        .map(|&f| format!("{} {}", f.name(), g.sd_of(f).map_or("-".into(), |s| f.fmt(s))))
+                        .collect();
+                    println!(
+                        "    {:<18} n {:>3}  {}  match {}  horizon {} ms  -> {:.0} %",
+                        g.name(), g.n, f.join("  "), g.match_db.map_or("-".into(), |m| format!("{m:.1} dB")), g.horizon_ms, g.pct
+                    );
+                }
                 for w in run.worst_windows(&rep, &onsets, 3) {
                     let (s0, _) = run.window_span(&w);
                     let t = s0 - run.plan.scoring_start() + beat_seconds(run.plan.bpm);
                     println!(
-                        "    window bars {}-{} ({}:{:02}) {}: {:.0} %  evenness {} ms  drifted {:+.0} ms  missed {}  extra {}  attacks {:.1} dB",
+                        "    window bars {}-{} ({}:{:02}) {}: {:.0} %  evenness {} ms  drifted {:+.0} ms  missed {}  extra {}  tone {}",
                         w.start_bar + 1, w.start_bar + w.bars, t as u32 / 60, t as u32 % 60, w.pattern_id, w.score_pct,
                         w.evenness_ms.map_or("-".into(), |e| format!("{e:.0}")),
-                        w.drift_ms, w.n_missed, w.n_extra, w.level_sd_db
+                        w.drift_ms, w.n_missed, w.n_extra, crate::tone::window_label(&w.tone_sd).unwrap_or_else(|| "-".into())
                     );
                 }
             }
@@ -545,8 +548,8 @@ mod tests {
         assert_eq!(rep.slots.len(), run.slot_table().len());
         assert!(rep.slots.iter().all(|s| !s.pattern.is_empty()));
         assert!(rep.n_missed <= 2, "{}", rep.n_missed);
-        assert_eq!(rep.pm.n + rep.open.n, rep.n_matched);
-        assert!(rep.open.n > 0, "quarters segment is open");
+        assert!(rep.tone.groups.iter().any(|g| !g.pm), "quarters segment is open");
+        assert!(rep.tone.groups.iter().map(|g| g.n).sum::<usize>() <= rep.n_matched);
         for w in run.worst_windows(&rep, &onsets, 3) {
             assert!(w.notes.iter().all(|&i| run.plan.notes[i].pattern == w.pattern), "runs: one pattern per window");
         }

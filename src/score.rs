@@ -9,10 +9,8 @@
 //! - drift %       = (100 ms - drift) / 85 ms                    (15 ms -> 100 %, 100 ms -> 0 %)
 //! - hit factor    = max(0, matched - min(0.5 * extra, grid / 4)) / grid notes
 //! - timing %      = (0.75 * uniformity % + 0.25 * drift %) * hit factor
-//! - level score   = per group, count-weighted: palm-muted (4 dB - sd) / 3 dB, open
-//!                   (7 dB - sd) / 5 dB; sd after removing each slot's mean level
-//! - centroid score= (0.5 oct - brightness sd) / 0.4 oct, count-weighted over the groups
-//! - tone %        = 0.75 * level score + 0.25 * centroid score
+//! - tone %        = stroke consistency per pick direction and P.M./open group: volume,
+//!                   attack, sustain and brightness spreads (see `tone`)
 //! - combined %    = 0.6 * timing % + 0.4 * tone %;  pass at 60
 //! Onsets are assigned to notes against a local offset track (sliding median over +/-4 s)
 //! so matching survives a wandering player; all scores use the global offset.
@@ -20,6 +18,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::detect::Onset;
+use crate::tone::{Feature, StrokeIn, ToneReport};
 use crate::dsp::{mean, median, std};
 
 pub const MATCH_WINDOW_SIXTEENTHS: f64 = 0.4;
@@ -94,37 +93,30 @@ pub struct ScoreReport {
     pub slots: Vec<SlotStat>,
     pub level_median_db: f64,
     pub level_std_db: f64,
+    /// Volume spread within the tone groups (after removing note means), count-weighted, dB.
     pub level_std_detrended_db: f64,
-    /// Attack-brightness spread (octaves), count-weighted over the P.M. and open groups.
-    pub centroid_std_oct: Option<f64>,
-    /// Per group (palm-muted / open as marked by the pattern).
-    pub pm: ToneGroup,
-    pub open: ToneGroup,
+    /// Stroke consistency per (pick direction, P.M.) group.
+    #[serde(default)]
+    pub tone: ToneReport,
     pub hit_factor: f64,
     pub spread_pct: f64,
     pub timing_pct: f64,
-    pub level_pct: f64,
-    pub centroid_pct: Option<f64>,
     pub tone_pct: f64,
     pub combined_pct: f64,
     pub notes: Vec<NoteResult>,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct ToneGroup {
-    pub n: usize,
-    /// Attack-level spread after removing each slot's mean (dB).
-    pub level_std_db: f64,
-    pub centroid_std_oct: Option<f64>,
-    pub centroid_median_hz: Option<f64>,
 }
 
 pub struct GridIn {
     /// Grid time in the recording's timeline (seconds), already including any known latency.
     pub time: f64,
     pub slot: usize,
-    /// Marked palm-muted in the pattern.
+    /// Marked palm-muted in the pattern (and palm mutes are on).
     pub pm: bool,
+    /// Pick direction.
+    pub down: bool,
+    /// Fretted note (MIDI) and string, to compare like with like.
+    pub midi: u8,
+    pub string: u8,
 }
 
 pub struct ScoreInput<'a> {
@@ -231,13 +223,6 @@ pub fn timing_pct(spread_ms: f64, drift_rms_ms: f64, hit: f64) -> f64 {
     (0.75 * evenness_pct(spread_ms) + 0.25 * drift_pct(drift_rms_ms)) * hit
 }
 
-/// Level score from the palm-muted and open groups' spreads (dB) and note counts:
-/// palm-muted on a 1..4 dB scale, open on 2..7 dB, weighted by count.
-pub fn level_pct(pm_sd: f64, n_pm: usize, open_sd: f64, n_open: usize) -> f64 {
-    let (np, no) = (n_pm as f64, n_open as f64);
-    (np * pct((4.0 - pm_sd) / 3.0) + no * pct((7.0 - open_sd) / 5.0)) / (np + no).max(1.0)
-}
-
 pub fn combined_pct(timing: f64, tone: f64) -> f64 {
     0.6 * timing + 0.4 * tone
 }
@@ -338,10 +323,8 @@ pub fn score(inp: &ScoreInput) -> ScoreReport {
     // Decomposition: per-slot pattern, slow drift, note-to-note jitter.
     let n_slots = inp.slots_per_bar.max(1);
     let mut slot_devs = vec![Vec::new(); n_slots];
-    let mut slot_levels = vec![Vec::new(); n_slots];
-    for ((d, l), s) in devs.iter().zip(&levels).zip(&slots_of) {
+    for (d, s) in devs.iter().zip(&slots_of) {
         slot_devs[*s % n_slots].push(*d);
-        slot_levels[*s % n_slots].push(*l);
     }
     rep.slots = slot_devs
         .iter()
@@ -372,67 +355,28 @@ pub fn score(inp: &ScoreInput) -> ScoreReport {
 
     // Tone consistency.
     rep.level_std_db = std(&levels);
-    let slot_lvl_mean: Vec<f64> = slot_levels.iter().map(|v| mean(v)).collect();
-    let lvl_resid: Vec<f64> = levels.iter().zip(&slots_of).map(|(l, s)| l - slot_lvl_mean[*s % n_slots]).collect();
-    let matched_pm: Vec<bool> = rep.notes.iter().filter(|n| n.onset_time.is_some()).map(|n| n.pm).collect();
-    // Attack brightness per matched note (log2 Hz), minus its slot's mean: a slot has a
-    // fixed string, fret and P.M. marking in its pattern, so this also removes the
-    // brightness differences between strings and notes.
-    let bright: Vec<Option<f64>> = match inp.audio {
-        Some((x, sr)) => {
-            let times: Vec<f64> = rep.notes.iter().filter_map(|n| n.onset_time).collect();
-            times.iter().map(|t| centroids(x, sr, &[*t]).first().map(|c| c.log2())).collect()
-        }
-        None => vec![None; levels.len()],
-    };
-    let mut slot_b = vec![Vec::new(); n_slots];
-    for (b, s) in bright.iter().zip(&slots_of) {
-        if let Some(b) = b {
-            slot_b[*s % n_slots].push(*b);
-        }
-    }
-    let slot_b_mean: Vec<f64> = slot_b.iter().map(|v| mean(v)).collect();
-    for pm in [true, false] {
-        let resid: Vec<f64> = lvl_resid.iter().zip(&matched_pm).filter(|(_, p)| **p == pm).map(|(r, _)| *r).collect();
-        let b_resid: Vec<f64> = bright
+    if let Some((x, sr)) = inp.audio {
+        let strokes: Vec<StrokeIn> = grid
             .iter()
-            .zip(&slots_of)
-            .zip(&matched_pm)
-            .filter(|(_, p)| **p == pm)
-            .filter_map(|((b, s), _)| b.map(|b| b - slot_b_mean[*s % n_slots]))
+            .zip(&rep.notes)
+            .enumerate()
+            .filter_map(|(i, (g, n))| {
+                Some(StrokeIn { note: i, onset: n.onset_time?, level_db: n.level_db?, down: g.down, pm: g.pm, midi: g.midi, string: g.string })
+            })
             .collect();
-        let raw_hz: Vec<f64> = bright.iter().zip(&matched_pm).filter(|(_, p)| **p == pm).filter_map(|(b, _)| b.map(f64::exp2)).collect();
-        let g = ToneGroup {
-            n: resid.len(),
-            level_std_db: std(&resid),
-            centroid_std_oct: (b_resid.len() >= 4).then(|| std(&b_resid)),
-            centroid_median_hz: median(&raw_hz),
-        };
-        if pm {
-            rep.pm = g;
-        } else {
-            rep.open = g;
-        }
+        let times: Vec<f64> = onsets.iter().map(|o| o.time).collect();
+        rep.tone = crate::tone::analyse(x, sr, &strokes, &times);
     }
-    let (np, no) = (rep.pm.n as f64, rep.open.n as f64);
-    let wsum = (np + no).max(1.0);
-    rep.level_std_detrended_db = (np * rep.pm.level_std_db + no * rep.open.level_std_db) / wsum;
-    rep.centroid_std_oct = match (rep.pm.centroid_std_oct, rep.open.centroid_std_oct) {
-        (Some(a), Some(b)) => Some((np * a + no * b) / wsum),
-        (a, b) => a.or(b),
-    };
+    let lv: Vec<(f64, f64)> = rep.tone.groups.iter().filter_map(|g| g.sd_of(Feature::Level).map(|s| (g.n as f64, s))).collect();
+    let w: f64 = lv.iter().map(|v| v.0).sum();
+    rep.level_std_detrended_db = if w > 0.0 { lv.iter().map(|v| v.0 * v.1).sum::<f64>() / w } else { rep.level_std_db };
 
     let enough = devs.len() >= 4;
     rep.hit_factor = hit_factor(grid.len(), devs.len(), rep.n_extra);
     rep.spread_pct = if enough { evenness_pct(rep.spread_ms) } else { 0.0 };
     rep.drift_pct = if enough { drift_pct(rep.drift_rms_ms) } else { 0.0 };
     rep.timing_pct = if enough { timing_pct(rep.spread_ms, rep.drift_rms_ms, rep.hit_factor) } else { 0.0 };
-    rep.level_pct = if enough { level_pct(rep.pm.level_std_db, rep.pm.n, rep.open.level_std_db, rep.open.n) } else { 0.0 };
-    rep.centroid_pct = rep.centroid_std_oct.map(|s| pct((0.5 - s) / 0.4));
-    rep.tone_pct = match rep.centroid_pct {
-        Some(c) => 0.75 * rep.level_pct + 0.25 * c,
-        None => rep.level_pct,
-    };
+    rep.tone_pct = if enough { rep.tone.pct.unwrap_or(0.0) } else { 0.0 };
     rep.combined_pct = combined_pct(rep.timing_pct, rep.tone_pct);
     rep
 }
@@ -482,7 +426,7 @@ mod tests {
     use crate::detect::{DetectParams, detect};
 
     fn grid_for(n: usize, start: f64, s16: f64, step: usize) -> Vec<GridIn> {
-        (0..n).map(|i| GridIn { time: start + (i * step) as f64 * s16, slot: i % (16 / step), pm: true }).collect()
+        (0..n).map(|i| GridIn { time: start + (i * step) as f64 * s16, slot: i % (16 / step), pm: true, down: true, midi: 40, string: 6 }).collect()
     }
 
     fn onsets_from(grid: &[GridIn], mut f: impl FnMut(usize) -> Option<(f64, f64)>) -> Vec<Onset> {
@@ -502,8 +446,8 @@ mod tests {
         assert!((r.latency_ms - 23.0).abs() < 1e-6);
         assert!(r.spread_ms < 1e-6);
         assert!((r.timing_pct - 100.0).abs() < 1e-9);
-        assert!((r.tone_pct - 100.0).abs() < 1e-9);
-        assert!((r.combined_pct - 100.0).abs() < 1e-9);
+        assert_eq!(r.tone_pct, 0.0, "no audio, no tone");
+        assert!((r.combined_pct - 60.0).abs() < 1e-9);
     }
 
     #[test]
@@ -578,7 +522,7 @@ mod tests {
         let mut g = Vec::new();
         for bar in 0..12 {
             for (slot, p) in pos.iter().enumerate() {
-                g.push(GridIn { time: 0.5 + (bar as f64 * 16.0 + p) * s16, slot, pm: true });
+                g.push(GridIn { time: 0.5 + (bar as f64 * 16.0 + p) * s16, slot, pm: true, down: true, midi: 40, string: 6 });
             }
         }
         let mut rng = Rng::new(42);
@@ -591,6 +535,7 @@ mod tests {
         assert!((r.latency_ms - 12.0).abs() < 3.0, "{}", r.latency_ms);
         assert!(r.spread_ms > 6.0 && r.spread_ms < 10.0, "{}", r.spread_ms);
         assert!(r.level_std_db > 1.0 && r.level_std_db < 2.0, "{}", r.level_std_db);
-        assert!(r.centroid_std_oct.is_some());
+        assert_eq!(r.tone.groups.len(), 1, "all downstrokes, palm-muted");
+        assert!(r.tone.groups[0].sd_of(Feature::Brightness).is_some());
     }
 }

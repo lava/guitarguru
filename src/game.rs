@@ -66,9 +66,8 @@ pub struct ResultsState {
     pub difficulty_note: Option<String>,
     pub listening: Option<usize>,
     pub calibration: bool,
-    /// Spectral centroid (Hz) per report note (None if missed).
-    #[allow(dead_code)]
-    pub centroids: Vec<Option<f64>>,
+    /// Height of the results page as last drawn (design px).
+    pub content_h: Option<f32>,
 }
 
 #[derive(Default)]
@@ -359,15 +358,6 @@ impl Game {
         };
         let (rep, onsets) = run.analyse();
         let worst = run.worst_windows(&rep, &onsets, 3);
-        let centroids = rep
-            .notes
-            .iter()
-            .map(|n| {
-                n.onset_time.and_then(|t| {
-                    crate::score::centroids(&run.samples, f64::from(run.sample_rate), &[t]).first().copied()
-                })
-            })
-            .collect();
         let saved = run.save(&rep, &onsets, &worst);
         if let Err(e) = &saved {
             eprintln!("saving run failed: {e}");
@@ -412,7 +402,36 @@ impl Game {
             prev_best,
             listening: None,
             calibration: play.calibration,
-            centroids,
+            content_h: None,
+        });
+        self.screen = Screen::Results;
+    }
+
+    /// Show the results of a saved run (re-analysed; nothing is saved or recorded). For
+    /// checking the results screen against real takes (`GG_RESULTS`).
+    pub fn show_saved(&mut self, json: &std::path::Path) {
+        let (run, _) = match crate::session::load_run(json) {
+            Ok(r) => r,
+            Err(e) => {
+                self.message = Some(format!("cannot load {}: {e}", json.display()));
+                return;
+            }
+        };
+        let (rep, onsets) = run.analyse();
+        let worst = run.worst_windows(&rep, &onsets, 3);
+        let prev_best = self.progress.best_entry(&run.level.key()).cloned();
+        self.results = Some(ResultsState {
+            run,
+            rep,
+            onsets,
+            worst,
+            newly: Vec::new(),
+            saved: Ok(json.with_extension("wav")),
+            prev_best,
+            difficulty_note: None,
+            listening: None,
+            calibration: false,
+            content_h: None,
         });
         self.screen = Screen::Results;
     }

@@ -2,7 +2,7 @@
 //! `GG_AUTOPLAY=mix:pm+16@120` (run) or `GG_AUTOPLAY=gallop@120` (drill) starts that level, `GG_SHOTS=3,9.5` saves screenshots at those
 //! seconds to `GG_SHOT_DIR` (default `.`), `GG_END_AT=8` ends the run early (scores the
 //! full bars played so far), `GG_LISTEN_AT=10` starts listen-back of the worst section,
-//! `GG_FAKE_OUTPUT=1` replaces only the output with a silent one, `GG_EXIT_AT=12` quits, `GG_SCREEN=settings` opens the settings screen, `GG_SCROLLS=17:700` scrolls to 700 px at 17 s.
+//! `GG_FAKE_OUTPUT=1` replaces only the output with a silent one, `GG_EXIT_AT=12` quits, `GG_SCREEN=settings` opens the settings screen, `GG_SCROLLS=17:700` scrolls to 700 px at 17 s, `GG_RESULTS=run.json` opens the results of a saved run.
 
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
@@ -58,6 +58,11 @@ pub fn auto_system(mut auto: ResMut<Auto>, mut game: ResMut<Game>, time: Res<Tim
         && let Some(level) = Level::from_key(&format!("{p}@{b}"))
     {
         game.start_level(level, false);
+    }
+    if prev == 0.0
+        && let Some(p) = std::env::var_os("GG_RESULTS")
+    {
+        game.show_saved(std::path::Path::new(&p));
     }
     if prev == 0.0 && std::env::var("GG_SCREEN").as_deref() == Ok("settings") {
         game.refresh_lists();

@@ -5,7 +5,7 @@
 //! errors, deviations, per-pattern slots) and the tone section (palm-muted and open notes
 //! apart).
 
-use bevy::color::Color;
+use bevy::color::{Alpha, Color};
 
 use crate::game::{Game, ResultsState, Screen};
 use crate::mascot::{self, MascotImages, Mood};
@@ -14,8 +14,10 @@ use crate::patterns::{BPM_MAX, BPM_STEP, INGREDIENTS, Level, LevelKind, PATTERNS
 use crate::progress::PASS_THRESHOLD;
 use crate::score::ScoreReport;
 use crate::session::Window;
+use crate::tone::Feature;
 use crate::ui_menu::link;
 
+/// Content height before the first frame has measured it.
 const CONTENT_H: f32 = 2510.0;
 
 enum Action {
@@ -51,8 +53,9 @@ pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
         return;
     }
     // Scrolling
+    let content_h = r.content_h.unwrap_or(CONTENT_H);
     if p.scroll != 0.0 {
-        g.scroll = (g.scroll - p.scroll).clamp(0.0, CONTENT_H - 900.0);
+        g.scroll = (g.scroll - p.scroll).clamp(0.0, (content_h - 900.0).max(0.0));
     }
     p.offset_y = -g.scroll;
     let since = (g.clock - g.screen_since) as f32;
@@ -169,7 +172,7 @@ pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
     // ---------- timing
     let bottom = timing_section(p, r, 113.0, 1100.0);
     // ---------- tone
-    tone_section(p, r, 113.0, bottom + 60.0);
+    let end = tone_section(p, r, 113.0, bottom + 60.0);
 
     match action {
         Action::None => {}
@@ -185,6 +188,9 @@ pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
         }
         Action::Listen(i) => g.listen(i),
         Action::StopListen => g.stop_listen(),
+    }
+    if let Some(r) = &mut g.results {
+        r.content_h = Some(end + 60.0);
     }
     if let Some(r) = &mut g.results
         && r.listening.is_some()
@@ -269,8 +275,14 @@ fn verdict(r: &ResultsState, pass: bool, better: bool) -> String {
         format!("In {name}, {} comes {} ({:+.0} ms).", count_name(s.pos16), if s.mean_ms < 0.0 { "early" } else { "late" }, s.mean_ms)
     } else if rep.spread_ms > 25.0 {
         format!("Evenness {:.0} ms.", rep.spread_ms)
-    } else if rep.level_pct < 50.0 {
-        format!("Attacks vary by {:.1} dB.", rep.level_std_detrended_db)
+    } else if let Some((f, sd)) = rep.tone.worst().filter(|_| rep.tone_pct < 60.0) {
+        let what = match f {
+            Feature::Level => "Stroke volume",
+            Feature::Attack => "Pick attack",
+            Feature::Sustain => "Sustain",
+            Feature::Brightness => "Brightness",
+        };
+        format!("{what} varies by {}.", f.fmt(sd))
     } else {
         format!("Evenness {:.0} ms.", rep.spread_ms)
     };
@@ -305,8 +317,8 @@ fn window_problems(w: &Window) -> Vec<(String, Color)> {
     if w.n_extra > 0 {
         out.push((0.5 * w.n_extra as f64 / n, format!("{} extra", w.n_extra), col::DIM));
     }
-    if w.level_sd_db > 2.0 {
-        out.push((0.4 * (w.level_sd_db - 1.0) / 4.0, format!("attacks \u{b1}{:.1} dB", w.level_sd_db), col::TONE));
+    if let Some((f, sd, cost)) = crate::tone::worst_feature(&w.tone_sd).filter(|w| w.2 > 0.1) {
+        out.push((0.4 * cost, format!("{} {}", f.name(), f.fmt(sd)), col::TONE));
     }
     out.sort_by(|a, b| b.0.total_cmp(&a.0));
     out.into_iter().map(|(_, t, c)| (t, c)).collect()
@@ -569,46 +581,82 @@ fn run_timeline(p: &mut Paint, r: &ResultsState, x: f32, y: f32) {
     }
 }
 
-fn tone_section(p: &mut Paint, r: &ResultsState, x: f32, y: f32) {
-    let rep = &r.rep;
+/// Stroke tone per (pick direction, P.M.) group: every stroke's envelope drawn faintly
+/// over the group's median, then the spread of each feature (the group's costliest one in
+/// violet). Returns the bottom y.
+fn tone_section(p: &mut Paint, r: &ResultsState, x: f32, y: f32) -> f32 {
+    use crate::tone::{CAP_MS, Feature};
+    let tone = &r.rep.tone;
     section_header(p, x, y, "Tone", "");
-    let groups = [("Palm-muted notes", &rep.pm, true), ("Open notes", &rep.open, false)];
-    for (i, (title, grp, pm)) in groups.iter().enumerate() {
-        let gx = x + i as f32 * 587.0;
-        p.serif(gx, y + 64.0, *title, 22.0, col::TEXT, Align::Left);
-        if grp.n == 0 {
-            p.text(gx, y + 100.0, "none", 13.0, col::FAINT, Align::Left);
-            continue;
+    if tone.groups.is_empty() {
+        p.text(x, y + 64.0, "\u{2013}", 14.0, col::FAINT, Align::Left);
+        return y + 90.0;
+    }
+    const PW: f32 = 543.0;
+    const PH: f32 = 130.0;
+    const ROW: f32 = 300.0;
+    const TOP_DB: f32 = 6.0;
+    const BOT_DB: f32 = -42.0;
+    let ms_max = CAP_MS as f32;
+    for (gi, g) in tone.groups.iter().enumerate() {
+        let gx = x + (gi % 2) as f32 * 587.0;
+        let gy = y + 64.0 + (gi / 2) as f32 * ROW;
+        let (dir, mute) = (if g.down { "Downstrokes" } else { "Upstrokes" }, if g.pm { "palm-muted" } else { "open" });
+        p.serif(gx, gy, dir, 22.0, col::TEXT, Align::Left);
+        p.italic(gx + 8.0 + dir.len() as f32 * 10.0, gy + 2.0, mute, 17.0, col::DIM, Align::Left);
+        let right = match g.match_db {
+            Some(m) => format!("{} strokes \u{b7} envelope \u{b1}{m:.1} dB", g.n),
+            None => format!("{} strokes", g.n),
+        };
+        p.text(gx + PW, gy + 3.0, right, 12.0, col::DIM, Align::Right);
+        // Overlay, in dB relative to the median envelope's peak.
+        let (top, base) = (gy + 24.0, gy + 24.0 + PH);
+        let reference = g.median_env.iter().take(30).copied().fold(f32::MIN, f32::max);
+        let xs = |ms: f32| gx + PW * (ms / ms_max).min(1.0);
+        let ys = |db: f32| top + PH * ((TOP_DB - (db - reference).clamp(BOT_DB, TOP_DB)) / (TOP_DB - BOT_DB));
+        p.rect(gx, top, PW, PH, col::PANEL);
+        p.rect(gx, ys(reference) - 0.5, PW, 1.0, col::LINE);
+        let hx = xs(g.horizon_ms as f32);
+        let mut yy = top;
+        while yy < base {
+            p.rect(hx - 0.5, yy, 1.0, 3.0, col::FAINT);
+            yy += 7.0;
         }
-        p.label(gx, y + 96.0, "attack evenness");
-        p.serif(gx, y + 132.0, format!("{:.1}", grp.level_std_db), 44.0, col::TONE, Align::Left);
-        p.text(gx + 70.0, y + 140.0, "dB", 13.0, col::DIM, Align::Left);
-        p.text(gx, y + 166.0, format!("{} notes \u{b7} scale {}", grp.n, if *pm { "1\u{2013}4 dB" } else { "2\u{2013}7 dB" }), 12.0, col::DIM, Align::Left);
-        p.label(gx + 160.0, y + 96.0, "brightness");
-        let br = grp.centroid_std_oct.map_or("\u{2013}".to_string(), |o| format!("\u{b1}{:.0}", (2f64.powf(o) - 1.0) * 100.0));
-        p.serif(gx + 160.0, y + 132.0, br, 44.0, col::TONE, Align::Left);
-        p.text(gx + 232.0, y + 140.0, "%", 13.0, col::DIM, Align::Left);
-        // attack level bar by bar, relative to the run median
-        p.label(gx, y + 200.0, "attack level, bar by bar");
-        let nb = r.run.plan.scored_bars.max(1) as usize;
-        let bw = 543.0 / nb as f32;
-        for b in 0..nb {
-            let lv: Vec<f64> = rep
-                .notes
-                .iter()
-                .zip(&r.run.plan.notes)
-                .filter(|(n, gn)| gn.bar as usize == b && n.pm == *pm)
-                .filter_map(|(n, _)| n.level_db)
-                .collect();
-            if lv.is_empty() {
-                continue;
+        let faint = col::TONE.with_alpha((6.0 / g.n as f32).clamp(0.04, 0.25));
+        const STEP: usize = 3;
+        for s in tone.strokes.iter().filter(|s| s.group == gi) {
+            let mut prev: Option<(f32, f32)> = None;
+            for k in (0..s.env.len()).step_by(STEP) {
+                let pt = (xs(k as f32), ys(s.env[k]));
+                if let Some(q) = prev {
+                    p.line(q.0, q.1, pt.0, pt.1, faint);
+                }
+                prev = Some(pt);
             }
-            let d = crate::dsp::mean(&lv) - rep.level_median_db;
-            let h = (22.0 + d as f32 * 4.0).clamp(4.0, 40.0);
-            let c = if *pm { col::TONE } else { Color::srgb(0.72, 0.62, 0.80) };
-            p.rect(gx + b as f32 * bw, y + 260.0 - h, (bw - 1.5).max(1.0), h, c);
+        }
+        for k in (STEP..g.median_env.len()).step_by(STEP) {
+            p.line(xs((k - STEP) as f32), ys(g.median_env[k - STEP]), xs(k as f32), ys(g.median_env[k]), col::TEXT);
+        }
+        for ms in [0.0, 100.0, 200.0, 300.0, 400.0] {
+            let lbl = if ms == ms_max { format!("{ms:.0} ms") } else { format!("{ms:.0}") };
+            let al = if ms == 0.0 { Align::Left } else if ms == ms_max { Align::Right } else { Align::Center };
+            p.text(xs(ms), base + 13.0, lbl, 11.0, col::DIM, al);
+        }
+        p.text(gx - 6.0, ys(reference), "0", 11.0, col::DIM, Align::Right);
+        p.text(gx - 6.0, ys(reference - 30.0), "\u{2212}30", 11.0, col::DIM, Align::Right);
+        // Feature spreads.
+        let worst = crate::tone::worst_feature(&g.sd).filter(|w| w.2 > 0.1).map(|w| w.0);
+        for (fi, f) in Feature::ALL.iter().enumerate() {
+            let fx = gx + fi as f32 * 136.0;
+            p.label(fx, base + 44.0, f.name());
+            let (v, c) = match g.sd_of(*f) {
+                Some(sd) => (f.fmt(sd), if worst == Some(*f) { col::TONE } else { col::TEXT }),
+                None => ("\u{2013}".into(), col::FAINT),
+            };
+            p.serif(fx, base + 72.0, v, 24.0, c, Align::Left);
         }
     }
+    y + 64.0 + tone.groups.len().div_ceil(2) as f32 * ROW
 }
 
 fn draw_calibration(g: &mut Game, p: &mut Paint) {
