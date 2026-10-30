@@ -181,6 +181,12 @@ impl Game {
         self.cfg.save();
     }
 
+    /// Switch the guitar sound (rebuilds the monitoring chain, saves the config).
+    pub fn set_preset(&mut self, preset: crate::monitor::SoundPreset) {
+        self.cfg.tone.preset = preset;
+        self.rebuild_chain();
+    }
+
     pub fn chain_description(&self) -> String {
         self.engine
             .as_ref()

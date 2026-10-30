@@ -1,5 +1,9 @@
 //! Monitoring DSP ("amp sound"): input gain -> noise gate -> amp (NAM or fallback drive)
-//! -> cab IR (uniformly partitioned FFT convolution) -> output level.
+//! -> cab IR (uniformly partitioned FFT convolution) -> room -> output level.
+//! Three sound presets: heavy (the amp and cab chosen in Setup), a classic rock crunch
+//! (the Soldano capture driven much softer) and a clean studio sound (no amp model:
+//! compression, a touch of saturation, a warm cab and a small room). The presets'
+//! output trims match their loudness (see the `preset_loudness` test).
 //! Everything allocates on construction only; `process` is allocation-free.
 
 use std::path::{Path, PathBuf};
@@ -21,9 +25,53 @@ pub enum AmpChoice {
     Nam(String),
 }
 
+/// The guitar sound.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SoundPreset {
+    /// High gain: the amp and cab chosen in Setup.
+    #[default]
+    Heavy,
+    /// Classic rock'n'roll crunch.
+    Crunch,
+    /// Clean studio sound.
+    Clean,
+}
+
+impl SoundPreset {
+    pub const ALL: [SoundPreset; 3] = [SoundPreset::Heavy, SoundPreset::Crunch, SoundPreset::Clean];
+    pub fn name(self) -> &'static str {
+        match self {
+            SoundPreset::Heavy => "Heavy",
+            SoundPreset::Crunch => "Crunch",
+            SoundPreset::Clean => "Clean",
+        }
+    }
+    pub fn about(self) -> &'static str {
+        match self {
+            SoundPreset::Heavy => "high gain",
+            SoundPreset::Crunch => "classic rock'n'roll",
+            SoundPreset::Clean => "clean studio",
+        }
+    }
+}
+
+/// Crunch: the Soldano capture with the input this much lower, into a V30 cab.
+const CRUNCH_NAM: &str = "Lum-Soldano-SLO100-3.nam";
+const CRUNCH_DRIVE_DB: f32 = -18.0;
+const CRUNCH_CAB: &str = "1_Cookie_Monster.wav";
+/// Clean: a darker, mid-forward cab (DV-77).
+const CLEAN_CAB: &str = "2_Darth_Genocider.wav";
+/// Output trims (dB) that match the presets' loudness to heavy's, measured on DI takes.
+const CRUNCH_TRIM_DB: f32 = 5.0;
+const CLEAN_TRIM_DB: f32 = 6.0;
+/// The gate opens lower for the cleaner sounds, whose decays stay audible.
+const CRUNCH_GATE_OFFSET_DB: f32 = -6.0;
+const CLEAN_GATE_OFFSET_DB: f32 = -15.0;
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ToneSettings {
+    pub preset: SoundPreset,
     pub asset_dir: PathBuf,
     pub amp: AmpChoice,
     /// IR file name inside the asset directory, or None.
@@ -36,6 +84,7 @@ pub struct ToneSettings {
 impl Default for ToneSettings {
     fn default() -> Self {
         Self {
+            preset: SoundPreset::Heavy,
             asset_dir: PathBuf::from(DEFAULT_ASSET_DIR),
             amp: AmpChoice::Nam("Lum-Soldano-SLO100-3.nam".into()),
             cab: Some("1_Cookie_Monster.wav".into()),
@@ -136,6 +185,107 @@ impl Drive {
             self.lp1 = s2 + (self.lp1 - s2) * self.lp_a;
             self.lp2 = self.lp1 + (self.lp2 - self.lp1) * self.lp_a;
             *v = 0.3 * self.lp2;
+        }
+    }
+}
+
+/// One-pole high-pass.
+struct HighPass {
+    x: f32,
+    y: f32,
+    a: f32,
+}
+
+impl HighPass {
+    fn new(hz: f32, sr: f32) -> Self {
+        Self { x: 0.0, y: 0.0, a: (-2.0 * std::f32::consts::PI * hz / sr).exp() }
+    }
+    fn tick(&mut self, v: f32) -> f32 {
+        self.y = self.a * (self.y + v - self.x);
+        self.x = v;
+        self.y
+    }
+}
+
+/// Clean studio "amp": low cut, a feed-forward compressor (4:1 above -38 dBFS, 4 ms
+/// attack, 150 ms release, make-up gain), then a light tube-ish saturation.
+struct Studio {
+    hp1: HighPass,
+    hp2: HighPass,
+    env: f32,
+    att: f32,
+    rel: f32,
+}
+
+impl Studio {
+    const THRESHOLD_DB: f32 = -38.0;
+    const RATIO: f32 = 6.0;
+    const MAKEUP_DB: f32 = 20.0;
+    fn new(sr: f32) -> Self {
+        Self {
+            hp1: HighPass::new(70.0, sr),
+            hp2: HighPass::new(70.0, sr),
+            env: 0.0,
+            att: (-1.0 / (0.001 * sr)).exp(),
+            rel: (-1.0 / (0.150 * sr)).exp(),
+        }
+    }
+    fn process(&mut self, x: &mut [f32]) {
+        for v in x {
+            let h = self.hp2.tick(self.hp1.tick(*v));
+            let a = h.abs();
+            let c = if a > self.env { self.att } else { self.rel };
+            self.env = a + (self.env - a) * c;
+            let lvl = 20.0 * (self.env + 1e-9).log10();
+            let over = (lvl - Self::THRESHOLD_DB).max(0.0);
+            let gain_db = -over * (1.0 - 1.0 / Self::RATIO) + Self::MAKEUP_DB;
+            let y = h * db(gain_db);
+            // Soft, slightly asymmetric saturation; transparent at low levels.
+            *v = (1.2 * y + 0.08 * y * y).tanh() / 1.2;
+        }
+    }
+}
+
+/// A small room (Schroeder/Freeverb style: four damped combs into two all-passes), mixed
+/// in quietly.
+struct Room {
+    combs: [(Vec<f32>, usize, f32); 4],
+    allpasses: [(Vec<f32>, usize); 2],
+    feedback: f32,
+    damp: f32,
+    wet: f32,
+}
+
+impl Room {
+    fn new(sr: f32, wet: f32) -> Self {
+        let n = |len_44k: usize| ((len_44k as f32 * sr / 44100.0) as usize).max(1);
+        let comb = |l: usize| (vec![0.0; n(l)], 0usize, 0.0f32);
+        Self {
+            combs: [comb(1116), comb(1188), comb(1277), comb(1356)],
+            allpasses: [(vec![0.0; n(556)], 0), (vec![0.0; n(441)], 0)],
+            feedback: 0.72,
+            damp: 0.35,
+            wet,
+        }
+    }
+    fn process(&mut self, x: &mut [f32]) {
+        for v in x {
+            let input = *v * 0.25;
+            let mut out = 0.0;
+            for (buf, pos, lp) in &mut self.combs {
+                let y = buf[*pos];
+                *lp = y * (1.0 - self.damp) + *lp * self.damp;
+                buf[*pos] = input + *lp * self.feedback;
+                *pos = (*pos + 1) % buf.len();
+                out += y;
+            }
+            for (buf, pos) in &mut self.allpasses {
+                let b = buf[*pos];
+                buf[*pos] = out + b * 0.5;
+                out = b - out;
+                *pos = (*pos + 1) % buf.len();
+            }
+            *v += self.wet * out;
         }
     }
 }
@@ -277,15 +427,20 @@ pub fn load_ir(path: &Path, sr: u32, max_len: usize) -> Result<Vec<f32>, String>
 enum Amp {
     Clean,
     Drive(Drive),
+    /// Model and its output gain; `drive` scales its input.
     Nam(Box<nam_rs::Model>, f32),
+    Studio(Studio),
 }
 
 pub struct Chain {
     in_gain: f32,
+    /// Extra gain into the amp only (crunch drives the model softer).
+    drive: f32,
     out_gain: f32,
     gate: Gate,
     amp: Amp,
     cab: Option<Convolver>,
+    room: Option<Room>,
     pub description: String,
 }
 
@@ -293,6 +448,40 @@ impl Chain {
     /// Build the chain (loads files; call off the audio thread). Errors fall back to
     /// the built-in drive and are reported in `description`.
     pub fn build(s: &ToneSettings, sr: u32) -> Self {
+        match s.preset {
+            SoundPreset::Heavy => Self::build_heavy(s, sr),
+            SoundPreset::Crunch => {
+                let t = ToneSettings {
+                    amp: AmpChoice::Nam(CRUNCH_NAM.into()),
+                    cab: Some(CRUNCH_CAB.into()),
+                    gate_db: s.gate_db + CRUNCH_GATE_OFFSET_DB,
+                    output_db: s.output_db + CRUNCH_TRIM_DB,
+                    ..s.clone()
+                };
+                let mut c = Self::build_heavy(&t, sr);
+                c.drive = db(CRUNCH_DRIVE_DB);
+                c.description = format!("crunch: {}, drive {CRUNCH_DRIVE_DB:+.0} dB", c.description);
+                c
+            }
+            SoundPreset::Clean => {
+                let t = ToneSettings {
+                    amp: AmpChoice::Clean,
+                    cab: Some(CLEAN_CAB.into()),
+                    gate_db: s.gate_db + CLEAN_GATE_OFFSET_DB,
+                    output_db: s.output_db + CLEAN_TRIM_DB,
+                    ..s.clone()
+                };
+                let mut c = Self::build_heavy(&t, sr);
+                c.amp = Amp::Studio(Studio::new(sr as f32));
+                c.room = Some(Room::new(sr as f32, 0.18));
+                c.description = c.description.replace("clean DI", "clean: compressor, saturation") + ", small room";
+                c
+            }
+        }
+    }
+
+    /// The chain from the amp and cab settings as they are.
+    fn build_heavy(s: &ToneSettings, sr: u32) -> Self {
         let srf = sr as f32;
         let mut notes = Vec::new();
         let amp = match &s.amp {
@@ -326,10 +515,12 @@ impl Chain {
         });
         Self {
             in_gain: db(s.input_gain_db),
+            drive: 1.0,
             out_gain: db(s.output_db),
             gate: Gate::new(s.gate_db, srf),
             amp,
             cab,
+            room: None,
             description: notes.join(", "),
         }
     }
@@ -342,7 +533,13 @@ impl Chain {
         match &mut self.amp {
             Amp::Clean => {}
             Amp::Drive(d) => d.process(x),
+            Amp::Studio(st) => st.process(x),
             Amp::Nam(m, g) => {
+                if self.drive != 1.0 {
+                    for v in x.iter_mut() {
+                        *v *= self.drive;
+                    }
+                }
                 m.process_buffer(x);
                 for v in x.iter_mut() {
                     *v *= *g;
@@ -352,10 +549,21 @@ impl Chain {
         if let Some(c) = &mut self.cab {
             c.process(x);
         }
+        if let Some(r) = &mut self.room {
+            r.process(x);
+        }
         for v in x.iter_mut() {
-            *v = (*v * self.out_gain).clamp(-1.0, 1.0);
+            *v = soft_limit(*v * self.out_gain);
         }
     }
+}
+
+/// Linear up to 0.6 (-4.4 dBFS), then a smooth knee that never exceeds 1.0: stray peaks
+/// round off instead of clipping hard.
+fn soft_limit(v: f32) -> f32 {
+    const K: f32 = 0.6;
+    let a = v.abs();
+    if a <= K { v } else { v.signum() * (K + (1.0 - K) * ((a - K) / (1.0 - K)).tanh()) }
 }
 
 fn load_nam(path: &Path, sr: u32) -> Result<(nam_rs::Model, f32), String> {
@@ -394,6 +602,139 @@ mod tests {
             let k = i - 64; // latency B
             let d: f32 = (0..ir.len()).filter(|j| *j <= k).map(|j| ir[j] * x[k - j]).sum();
             assert!((y[i] - d).abs() < 1e-3, "{i}: {} vs {d}", y[i]);
+        }
+    }
+
+    #[test]
+    fn presets_load_and_stay_bounded() {
+        let old: ToneSettings = serde_json::from_str(r#"{"amp":{"Nam":"x.nam"},"cab":null}"#).unwrap();
+        assert_eq!(old.preset, SoundPreset::Heavy, "configs from before presets");
+        let back: ToneSettings = serde_json::from_str(&serde_json::to_string(&ToneSettings { preset: SoundPreset::Clean, ..old }).unwrap()).unwrap();
+        assert_eq!(back.preset, SoundPreset::Clean);
+        assert_eq!(soft_limit(0.5), 0.5);
+        assert!(soft_limit(5.0) <= 1.0 && soft_limit(-5.0) >= -1.0 && soft_limit(0.7) > 0.6);
+        // Clean without any asset files: compressor, saturation, room; no cab.
+        let s = ToneSettings { preset: SoundPreset::Clean, asset_dir: PathBuf::from("/nonexistent"), ..ToneSettings::default() };
+        let mut c = Chain::build(&s, 48000);
+        let mut x: Vec<f32> = (0..48000).map(|i| 0.3 * (i as f32 * 0.02).sin() * (-(i % 12000) as f32 / 3000.0).exp()).collect();
+        for b in x.chunks_mut(128) {
+            c.process(b);
+        }
+        assert!(x.iter().all(|v| v.is_finite() && v.abs() <= 1.0));
+        assert!(x.iter().any(|v| v.abs() > 0.05), "makes sound");
+        assert!(c.description.contains("small room"), "{}", c.description);
+    }
+
+    /// Integrated loudness (BS.1770 K-weighting at 48 kHz, 400 ms blocks, absolute and
+    /// relative gates), LUFS.
+    fn loudness(x: &[f32]) -> f64 {
+        let biquad = |x: &[f64], b: [f64; 3], a: [f64; 2]| {
+            let (mut x1, mut x2, mut y1, mut y2) = (0.0, 0.0, 0.0, 0.0);
+            x.iter()
+                .map(|&v| {
+                    let y = b[0] * v + b[1] * x1 + b[2] * x2 - a[0] * y1 - a[1] * y2;
+                    (x2, x1, y2, y1) = (x1, v, y1, y);
+                    y
+                })
+                .collect::<Vec<f64>>()
+        };
+        let v: Vec<f64> = x.iter().map(|&s| f64::from(s)).collect();
+        let v = biquad(&v, [1.53512485958697, -2.69169618940638, 1.19839281085285], [-1.69065929318241, 0.73248077421585]);
+        let v = biquad(&v, [1.0, -2.0, 1.0], [-1.99004745483398, 0.99007225036621]);
+        let (blk, hop) = (19200, 4800);
+        let ms: Vec<f64> = (0..v.len().saturating_sub(blk) / hop).map(|i| v[i * hop..i * hop + blk].iter().map(|s| s * s).sum::<f64>() / blk as f64).collect();
+        let l = |m: f64| -0.691 + 10.0 * m.log10();
+        let abs: Vec<f64> = ms.into_iter().filter(|&m| l(m) > -70.0).collect();
+        let rel = l(abs.iter().sum::<f64>() / abs.len() as f64) - 10.0;
+        let g: Vec<f64> = abs.into_iter().filter(|&m| l(m) > rel).collect();
+        l(g.iter().sum::<f64>() / g.len() as f64)
+    }
+
+    fn render(s: &ToneSettings, di: &[f32]) -> Vec<f32> {
+        let mut chain = Chain::build(s, 48000);
+        let mut y = di.to_vec();
+        for b in y.chunks_mut(128) {
+            chain.process(b);
+        }
+        y
+    }
+
+    /// Loudness of each preset over DI takes (`GG_DI_WAVS`, colon separated), relative to
+    /// heavy, and a crunch drive sweep (loudness and THD of a 110 Hz sine at the takes'
+    /// typical attack level). Renders go to `GG_RENDER_DIR` if set.
+    #[test]
+    #[ignore = "needs DI takes and the NAMix asset directory; prints preset loudness"]
+    fn preset_loudness() {
+        let paths = std::env::var("GG_DI_WAVS").expect("GG_DI_WAVS");
+        let mut di = Vec::new();
+        for p in paths.split(':') {
+            let mut r = hound::WavReader::open(p).unwrap();
+            let sp = r.spec();
+            assert_eq!(sp.sample_rate, 48000);
+            let v: Vec<f32> = match sp.sample_format {
+                hound::SampleFormat::Float => r.samples::<f32>().map(Result::unwrap).collect(),
+                hound::SampleFormat::Int => {
+                    let k = 1.0 / (1i64 << (sp.bits_per_sample - 1)) as f32;
+                    r.samples::<i32>().map(|v| v.unwrap() as f32 * k).collect()
+                }
+            };
+            di.extend(v.chunks(sp.channels as usize).map(|c| c[0]));
+        }
+        if let Some(sec) = std::env::var("GG_DI_SECONDS").ok().and_then(|v| v.parse::<usize>().ok()) {
+            di.truncate(sec * 48000);
+        }
+        let mut peaks: Vec<f32> = di.chunks(4800).map(|c| c.iter().fold(0.0f32, |m, v| m.max(v.abs()))).collect();
+        peaks.sort_by(f32::total_cmp);
+        let p90 = peaks[peaks.len() * 9 / 10];
+        println!("DI: {:.0} s, 100 ms peaks p90 {:.1} dBFS, loudness {:.1} LUFS", di.len() as f64 / 48000.0, 20.0 * p90.log10(), loudness(&di));
+        let base = ToneSettings::default();
+        let heavy = loudness(&render(&base, &di));
+        for preset in SoundPreset::ALL {
+            let s = ToneSettings { preset, ..base.clone() };
+            let y = render(&s, &di);
+            let peak = y.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+            let l = loudness(&y);
+            println!("{:7} {:+.1} LU vs heavy ({l:.1} LUFS), peak {:.1} dBFS, peak to loudness {:.1} dB", preset.name(), l - heavy, 20.0 * peak.log10(), 20.0 * f64::from(peak).log10() - l);
+            if let Ok(dir) = std::env::var("GG_RENDER_DIR") {
+                let spec = hound::WavSpec { channels: 1, sample_rate: 48000, bits_per_sample: 32, sample_format: hound::SampleFormat::Float };
+                let mut w = hound::WavWriter::create(format!("{dir}/{}.wav", preset.name().to_lowercase()), spec).unwrap();
+                y.iter().take(48000 * 30).for_each(|v| w.write_sample(*v).unwrap());
+                w.finalize().unwrap();
+            }
+        }
+        if std::env::var_os("GG_SWEEP").is_none() {
+            return;
+        }
+        // Crunch drive sweep, amp only (no cab), on a sine at the attack level after the
+        // input gain.
+        let amp_in = p90 * db(base.input_gain_db);
+        for drive in [0.0f32, -6.0, -10.0, -13.0, -16.0, -19.0, -22.0, -26.0] {
+            let (mut model, g) = load_nam(&base.asset_dir.join(CRUNCH_NAM), 48000).unwrap();
+            let n = 48000;
+            let mut x: Vec<f32> = (0..n).map(|i| amp_in * db(drive) * (std::f32::consts::TAU * 110.0 * i as f32 / 48000.0).sin()).collect();
+            for b in x.chunks_mut(128) {
+                model.process_buffer(b);
+            }
+            let y: Vec<f64> = x[n / 2..].iter().map(|v| f64::from(*v * g)).collect();
+            let (mut sc, mut cc) = (0.0, 0.0);
+            for (i, v) in y.iter().enumerate() {
+                let ph = std::f64::consts::TAU * 110.0 * (i + n / 2) as f64 / 48000.0;
+                sc += v * ph.sin();
+                cc += v * ph.cos();
+            }
+            let (a, b) = (2.0 * sc / y.len() as f64, 2.0 * cc / y.len() as f64);
+            let mean = y.iter().sum::<f64>() / y.len() as f64;
+            let total: f64 = y.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / y.len() as f64;
+            let fund = (a * a + b * b) / 2.0;
+            let thd = ((total - fund).max(0.0) / fund).sqrt();
+            let s = ToneSettings { preset: SoundPreset::Heavy, amp: AmpChoice::Nam(CRUNCH_NAM.into()), cab: Some(CRUNCH_CAB.into()), ..base.clone() };
+            let mut chain = Chain::build(&s, 48000);
+            chain.drive = db(drive);
+            let mut yy = di.clone();
+            for b in yy.chunks_mut(128) {
+                chain.process(b);
+            }
+            println!("drive {drive:+5.0} dB: THD {:5.1} %, {:+.1} LU vs heavy", thd * 100.0, loudness(&yy) - heavy);
         }
     }
 

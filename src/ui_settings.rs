@@ -1,11 +1,11 @@
 //! Setup ("Guitar Guru" style): hairline lists with radio dots, a thin level meter, round
-//! -/+ buttons. Input device and channel, output, amp and cabinet, monitoring, click,
-//! latency calibration.
+//! -/+ buttons. Input device and channel, output, the guitar sound (preset; amp and
+//! cabinet for the heavy one), monitoring, click, latency calibration.
 
 use std::sync::atomic::Ordering;
 
 use crate::game::{Game, Screen, calibration_level};
-use crate::monitor::AmpChoice;
+use crate::monitor::{AmpChoice, SoundPreset};
 use crate::paint::{Align, Paint, col, fit};
 use crate::ui_menu::{header, link};
 
@@ -165,32 +165,43 @@ pub fn draw(g: &mut Game, p: &mut Paint) {
     }
     g.lists.output_scroll = osc;
 
-    // ---------- amp and cabinet
-    p.serif(RX, 139.0, "Amp and cabinet", 28.0, col::TEXT, Align::Left);
-    let mut amps = vec![("Clean DI".to_string(), "no amp".to_string(), AmpChoice::Clean), ("Built-in drive".to_string(), "fallback".to_string(), AmpChoice::Drive)];
-    for n in &g.lists.nams {
-        amps.push((n.trim_end_matches(".nam").trim_start_matches("Lum-").replace('-', " "), "NAM capture".into(), AmpChoice::Nam(n.clone())));
+    // ---------- sound: three presets; the heavy one uses the amp and cab chosen here
+    p.serif(RX, 139.0, "Sound", 28.0, col::TEXT, Align::Left);
+    for (k, preset) in SoundPreset::ALL.into_iter().enumerate() {
+        let sel = g.cfg.tone.preset == preset;
+        let x = RX + k as f32 * 174.0;
+        if radio_inline(p, x, 182.0, preset.name(), sel, 15.0) && !sel {
+            g.cfg.tone.preset = preset;
+            rebuild = true;
+        }
+        p.text(x + 22.0, 202.0, preset.about(), 11.0, col::FAINT, Align::Left);
     }
-    let arows: Vec<(String, String, bool)> = amps.iter().map(|(l, n, c)| (l.clone(), n.clone(), g.cfg.tone.amp == *c)).collect();
-    let mut asc = 0usize;
-    if let Some(k) = radio_list(p, &mut asc, RX, 160.0, &arows, 4) {
-        g.cfg.tone.amp = amps[k].2.clone();
-        rebuild = true;
+    let top = 226.0;
+    if g.cfg.tone.preset == SoundPreset::Heavy {
+        let mut amps = vec![("Clean DI".to_string(), "no amp".to_string(), AmpChoice::Clean), ("Built-in drive".to_string(), "fallback".to_string(), AmpChoice::Drive)];
+        for n in &g.lists.nams {
+            amps.push((n.trim_end_matches(".nam").trim_start_matches("Lum-").replace('-', " "), "NAM capture".into(), AmpChoice::Nam(n.clone())));
+        }
+        let arows: Vec<(String, String, bool)> = amps.iter().map(|(l, n, c)| (l.clone(), n.clone(), g.cfg.tone.amp == *c)).collect();
+        let mut asc = 0usize;
+        if let Some(k) = radio_list(p, &mut asc, RX, top, &arows, 4) {
+            g.cfg.tone.amp = amps[k].2.clone();
+            rebuild = true;
+        }
+        let irs = g.lists.irs.clone();
+        let mut crows = vec![("No cab".to_string(), "DI".to_string(), g.cfg.tone.cab.is_none())];
+        for ir in &irs {
+            let label = ir.trim_end_matches(".wav").split_once('_').map_or(ir.clone(), |(_, n)| n.replace('_', " "));
+            crows.push((label, "Jester IR".into(), g.cfg.tone.cab.as_deref() == Some(ir.as_str())));
+        }
+        let mut csc = g.lists.cab_scroll;
+        if let Some(k) = radio_list(p, &mut csc, RX, top + 4.0 * ROW + 26.0, &crows, 4) {
+            g.cfg.tone.cab = if k == 0 { None } else { Some(irs[k - 1].clone()) };
+            rebuild = true;
+        }
+        g.lists.cab_scroll = csc;
     }
-    let cy = 160.0 + 4.0 * ROW + 30.0;
-    let irs = g.lists.irs.clone();
-    let mut crows = vec![("No cab".to_string(), "DI".to_string(), g.cfg.tone.cab.is_none())];
-    for ir in &irs {
-        let label = ir.trim_end_matches(".wav").split_once('_').map_or(ir.clone(), |(_, n)| n.replace('_', " "));
-        crows.push((label, "Jester IR".into(), g.cfg.tone.cab.as_deref() == Some(ir.as_str())));
-    }
-    let mut csc = g.lists.cab_scroll;
-    if let Some(k) = radio_list(p, &mut csc, RX, cy, &crows, 5) {
-        g.cfg.tone.cab = if k == 0 { None } else { Some(irs[k - 1].clone()) };
-        rebuild = true;
-    }
-    g.lists.cab_scroll = csc;
-    let ty = cy + 5.0 * ROW + 34.0;
+    let ty = top + 8.0 * ROW + 54.0 - 6.0;
     let d = stepper(p, RX, ty, "gate", &format!("{:.0}", g.cfg.tone.gate_db));
     if d != 0 {
         g.cfg.tone.gate_db = (g.cfg.tone.gate_db + 5.0 * d as f32).clamp(-90.0, -20.0);
@@ -201,7 +212,7 @@ pub fn draw(g: &mut Game, p: &mut Paint) {
         g.cfg.tone.output_db = (g.cfg.tone.output_db + 2.0 * d as f32).clamp(-40.0, 12.0);
         rebuild = true;
     }
-    let my2 = ty + 40.0;
+    let my2 = ty + 36.0;
     if radio_inline(p, RX, my2, "Hear the amp while playing (monitoring)", g.cfg.audio.monitor, 15.0) {
         g.cfg.audio.monitor = !g.cfg.audio.monitor;
         if let Some(e) = &g.engine {
@@ -212,7 +223,7 @@ pub fn draw(g: &mut Game, p: &mut Paint) {
     p.text(RX, my2 + 22.0, fit(&g.chain_description(), CW, 12.0), 12.0, col::FAINT, Align::Left);
 
     // ---------- click
-    let ky = 680.0;
+    let ky = 704.0;
     p.serif(RX, ky, "Click", 28.0, col::TEXT, Align::Left);
     let d = stepper(p, RX, ky + 40.0, "volume", &format!("{:.0}", g.cfg.audio.click_volume_db));
     if d != 0 {
@@ -230,7 +241,7 @@ pub fn draw(g: &mut Game, p: &mut Paint) {
     }
 
     // ---------- latency
-    let ly = 800.0;
+    let ly = 814.0;
     p.serif(RX, ly, "Latency", 28.0, col::TEXT, Align::Left);
     let txt = g.cfg.latency_ms.map_or("\u{2013}".to_string(), |l| format!("{l:+.0} ms"));
     p.serif(RX + 130.0, ly, txt, 30.0, col::TEXT, Align::Left);
