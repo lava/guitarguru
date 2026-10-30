@@ -5,6 +5,7 @@ mod countin;
 mod detect;
 mod dsp;
 mod game;
+mod mascot;
 mod monitor;
 mod paint;
 mod patterns;
@@ -27,14 +28,20 @@ fn main() {
         return;
     }
     App::new()
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "guitarguru".into(),
-                resolution: WindowResolution::new(1440, 900),
-                ..default()
-            }),
-            ..default()
-        }))
+        .add_plugins(
+            DefaultPlugins
+                .set(WindowPlugin {
+                    primary_window: Some(Window {
+                        title: "Guitar Guru".into(),
+                        resolution: WindowResolution::new(1440, 900),
+                        ..default()
+                    }),
+                    ..default()
+                })
+                // Assets (fonts, mascot layers) live next to Cargo.toml.
+                .set(AssetPlugin { file_path: concat!(env!("CARGO_MANIFEST_DIR"), "/assets").into(), ..default() }),
+        )
+        .add_systems(Startup, mascot::load)
         .add_plugins(paint::PaintPlugin)
         .insert_resource(game::Game::new())
         .insert_resource(auto::Auto::from_env())

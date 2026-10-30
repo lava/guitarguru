@@ -92,6 +92,12 @@ pub struct Game {
     pub selected: Level,
     /// Ingredient toggles on the main screen (bit mask).
     pub mix: u8,
+    /// Seconds since start (UI animation clock).
+    pub clock: f64,
+    pub last_screen: Screen,
+    pub screen_since: f64,
+    /// Vertical scroll of the current screen (design px, >= 0).
+    pub scroll: f32,
     pub play: Option<PlayState>,
     pub results: Option<ResultsState>,
     pub lists: SettingsLists,
@@ -114,6 +120,10 @@ impl Game {
             meter_hold: 0.0,
             selected: Level::run(0, crate::patterns::BASE_BPM),
             mix: 0,
+            clock: 0.0,
+            last_screen: Screen::Menu,
+            screen_since: 0.0,
+            scroll: 0.0,
             play: None,
             results: None,
             lists: SettingsLists::default(),
@@ -426,15 +436,34 @@ pub fn calibration_level() -> Level {
     Level::drill(PATTERNS.iter().position(|p| p.id == "quarters").expect("quarters pattern"), CALIBRATION_BPM)
 }
 
-pub fn game_system(mut game: ResMut<Game>, mut paint: ResMut<Paint>, time: Res<Time>, keys: Res<ButtonInput<KeyCode>>, mut exit: MessageWriter<AppExit>) {
+#[allow(clippy::too_many_arguments)]
+pub fn game_system(
+    mut game: ResMut<Game>,
+    mut paint: ResMut<Paint>,
+    time: Res<Time>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mascot: Option<Res<crate::mascot::MascotImages>>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    let Some(mascot) = mascot else { return };
     let g = &mut *game;
     g.update_meter(time.delta_secs());
+    g.clock += f64::from(time.delta_secs());
+    // Calm ease-out fade on every screen change.
+    if g.screen != g.last_screen {
+        g.last_screen = g.screen;
+        g.screen_since = g.clock;
+        g.scroll = 0.0;
+    }
+    let t = ((g.clock - g.screen_since) / 0.35).clamp(0.0, 1.0) as f32;
+    paint.fade = 1.0 - (1.0 - t).powi(3);
+    let mascot = &*mascot;
     match g.screen {
         Screen::Menu => {
             if keys.just_pressed(KeyCode::Escape) {
                 exit.write(AppExit::Success);
             }
-            crate::ui_menu::draw(g, &mut paint, &keys);
+            crate::ui_menu::draw(g, &mut paint, &keys, mascot);
         }
         Screen::Settings => {
             if keys.just_pressed(KeyCode::Escape) {
@@ -453,7 +482,7 @@ pub fn game_system(mut game: ResMut<Game>, mut paint: ResMut<Paint>, time: Res<T
             }
             g.tick_play();
             if g.screen == Screen::Play {
-                crate::ui_play::draw(g, &mut paint);
+                crate::ui_play::draw(g, &mut paint, mascot);
             }
         }
         Screen::Results => {
@@ -463,7 +492,7 @@ pub fn game_system(mut game: ResMut<Game>, mut paint: ResMut<Paint>, time: Res<T
             } else if keys.just_pressed(KeyCode::Space) || keys.just_pressed(KeyCode::KeyR) {
                 g.retry();
             }
-            crate::ui_results::draw(g, &mut paint);
+            crate::ui_results::draw(g, &mut paint, mascot);
         }
     }
 }

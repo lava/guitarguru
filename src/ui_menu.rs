@@ -1,52 +1,131 @@
-//! Main screen: ingredient toggles, a row of BPM nodes for the toggled combination (with
-//! unlock edges between neighbours), and the drills that fit the combination.
-//! Click to select, click again (or Enter) to play.
+//! Main screen ("Guitar Guru" style): the guru reacting to the chosen tempo and
+//! ingredients, ingredient pills, a row of BPM circles with unlock lines, the Play button,
+//! the guru's stages strip and a hairline drills list.
 
 use bevy::input::ButtonInput;
 use bevy::input::keyboard::KeyCode;
 
 use crate::game::{Game, Screen, calibration_level};
-use crate::paint::{Align, Paint, col, fit};
-use crate::patterns::{BPM_MAX, BPM_MIN, BPM_STEP, INGREDIENTS, Level, LevelKind, PATTERNS, bpm_steps, is_riff_continuation, mask_name};
-use crate::ui_common::*;
+use crate::mascot::{self, MascotImages, Mood, STAGE_NAMES};
+use crate::paint::{Align, Font, Paint, col, fit};
+use crate::patterns::{BPM_MAX, BPM_MIN, BPM_STEP, INGREDIENTS, Level, LevelKind, PATTERNS, bpm_steps, is_riff_continuation};
+use crate::progress::PASS_THRESHOLD;
 
-const NODE_Y: f32 = 330.0;
-const R: f32 = 34.0;
+const RX: f32 = 653.0;
 
 fn node_x(bpm: u32) -> f32 {
-    230.0 + ((bpm - BPM_MIN) / BPM_STEP) as f32 * 140.0
+    694.0 + ((bpm - BPM_MIN) / BPM_STEP) as f32 * 83.5
 }
 
-pub fn draw(g: &mut Game, p: &mut Paint, keys: &ButtonInput<KeyCode>) {
-    p.text(32.0, 40.0, "GUITARGURU", 30.0, col::BRASS, Align::Left);
+/// Header: lotus, title, gold block-print band (main screen) or a hairline.
+pub fn header(p: &mut Paint, title: &str, band: bool) {
+    lotus(p, 137.0, 62.0, 1.0);
+    p.italic(170.0, 56.0, title, 46.0, col::TEXT, Align::Left);
+    if band {
+        let (y0, y1) = (97.0, 111.0);
+        p.hline(120.0, y0, 1200.0, col::GOLD);
+        p.hline(120.0, y1, 1200.0, col::GOLD);
+        let mut x = 122.0;
+        let mut k = 0;
+        while x < 1320.0 {
+            if k % 2 == 0 {
+                p.rot_rect(x, 104.0, 5.0, 5.0, std::f32::consts::FRAC_PI_4, col::GOLD);
+                p.rot_rect(x, 104.0, 2.4, 2.4, std::f32::consts::FRAC_PI_4, col::BG);
+            } else {
+                p.disc(x, 104.0, 1.3, col::GOLD);
+            }
+            x += 14.0;
+            k += 1;
+        }
+    } else {
+        p.hline(120.0, 97.0, 1200.0, col::LINE);
+    }
+}
+
+/// Small lotus logo (petal outlines in ochre).
+pub fn lotus(p: &mut Paint, cx: f32, cy: f32, s: f32) {
+    for (dx, rot, len) in [(-12.0f32, 1.1f32, 14.0f32), (12.0, -1.1, 14.0), (-7.0, 0.55, 18.0), (7.0, -0.55, 18.0), (0.0, 0.0, 22.0)] {
+        let (x, y) = (cx + dx * s, cy - len * 0.32 * s);
+        p.petal(x, y, len * s, len * 0.45 * s, rot, col::OCHRE);
+        p.petal(x, y + 0.8 * s, len * s * 0.8, len * 0.45 * s * 0.6, rot, col::BG);
+    }
+    p.hline(cx - 14.0 * s, cy + 2.0 * s, 28.0 * s, col::OCHRE);
+}
+
+/// Underlined text link (right-aligned at x); returns true when clicked.
+pub fn link(p: &mut Paint, x: f32, y: f32, s: &str) -> bool {
+    let w = s.len() as f32 * 8.2;
+    let hov = p.hover(x - w, y - 12.0, w, 26.0);
+    p.styled(x, y, s, 15.0, if hov { col::OCHRE } else { col::TEXT }, Align::Right, Font::SansBold, 0.0);
+    p.hline(x - w, y + 11.0, w, if hov { col::OCHRE } else { col::TEXT });
+    p.clicked && hov
+}
+
+pub fn truncate(s: &str, n: usize) -> String {
+    if s.chars().count() <= n { s.to_string() } else { s.chars().take(n - 1).collect::<String>() + "\u{2026}" }
+}
+
+fn ingredient_list(mask: u8) -> String {
+    let names: Vec<String> = INGREDIENTS.iter().filter(|i| mask & i.bit != 0).map(|i| i.name.to_lowercase()).collect();
+    names.join(", ")
+}
+
+pub fn draw(g: &mut Game, p: &mut Paint, keys: &ButtonInput<KeyCode>, imgs: &MascotImages) {
+    header(p, "Guitar Guru", true);
     let calib = match g.cfg.latency_ms {
-        Some(l) => format!("latency {l:+.0} ms"),
-        None => "calibrate latency".into(),
+        Some(l) => format!("Latency {l:+.0} ms"),
+        None => "Calibrate latency".into(),
     };
-    if p.button(1090.0, 22.0, 190.0, 38.0, &calib, false) {
+    if link(p, 1200.0, 56.0, &calib) {
         g.start_level(calibration_level(), true);
         return;
     }
-    if p.button(1292.0, 22.0, 116.0, 38.0, "settings", false) {
+    if link(p, 1320.0, 56.0, "Setup") {
         g.refresh_lists();
         g.screen = Screen::Settings;
         return;
     }
 
-    // ---------- ingredient toggles
-    p.label(32.0, 124.0, "mix in");
+    // ---------- the guru (left), nodding along at the selected tempo
+    let mix = g.mix;
+    let sel_bpm = g.selected.bpm;
+    let stage = mascot::stage_for(sel_bpm, mix.count_ones());
+    let beats = g.clock * f64::from(sel_bpm) / 60.0;
+    let accent = (beats.round() as i64).rem_euclid(4) == 0;
+    let pose = mascot::pose(stage, Some(beats - beats.floor()), accent);
+    mascot::draw(p, imgs, 220.0, 196.0, 1.15, stage, Mood::Neutral, &pose);
+    p.label_at(357.0, 536.0, "today's guru", Align::Center, col::DIM);
+    p.serif(357.0, 566.0, STAGE_NAMES[stage as usize], 36.0, col::TEXT, Align::Center);
+    for i in 0..5 {
+        p.rect(281.0 + i as f32 * 32.0, 595.0, 26.0, 2.0, if i < stage { col::OCHRE } else { col::LINE });
+    }
+
+    // ---------- ingredients
+    p.label(RX, 214.0, "ingredients");
     let unlocked_mask = g.progress.unlocked_mask();
+    let mut x = RX;
+    let mut hint = None;
     for (i, ing) in INGREDIENTS.iter().enumerate() {
-        let (x, y, w, h) = (120.0 + i as f32 * 270.0, 100.0, 256.0, 48.0);
-        let on = g.mix & ing.bit != 0;
+        let short = if ing.code == "16" { "16ths" } else { ing.name };
+        let w = 62.0 + short.len() as f32 * 8.4;
+        let (y, h) = (236.0, 42.0);
+        let on = mix & ing.bit != 0;
         if g.progress.ingredient_unlocked(i) {
             let hov = p.hover(x, y, w, h);
-            p.rect(x, y, w, h, if on { col::BRASS } else if hov { col::PANEL2 } else { col::PANEL });
-            p.frame(x, y, w, h, 1.0, if on { col::BRASS } else { col::LINE });
-            p.text(x + 16.0, y + h / 2.0, ing.name, 18.0, if on { col::BG } else { col::TEXT }, Align::Left);
-            p.text(x + w - 14.0, y + h / 2.0, if on { "on" } else { "off" }, 13.0, if on { col::BG } else { col::FAINT }, Align::Right);
+            if on {
+                p.rect(x, y, w, h, col::OCHRE_TINT);
+                p.frame(x, y, w, h, 1.0, col::OCHRE);
+                p.disc(x + 24.0, y + h / 2.0, 6.0, col::OCHRE);
+            } else {
+                if hov {
+                    p.rect(x, y, w, h, col::PANEL);
+                }
+                p.frame(x, y, w, h, 1.0, col::TEXT);
+                p.ring(x + 24.0, y + h / 2.0, 6.0, col::TEXT);
+            }
+            p.styled(x + 40.0, y + h / 2.0 - 1.0, short, 16.0, col::TEXT, Align::Left, Font::SansMedium, 0.0);
             if g.progress.fresh.contains(&format!("ingredient:{}", ing.code)) {
-                p.disc(x + w - 6.0, y + 6.0, 5.0, col::BRASS);
+                p.disc(x + w - 6.0, y + 6.0, 4.0, col::OCHRE);
             }
             if p.hit(x, y, w, h) {
                 g.mix ^= ing.bit;
@@ -54,109 +133,161 @@ pub fn draw(g: &mut Game, p: &mut Paint, keys: &ButtonInput<KeyCode>) {
                 g.selected = Level::run(g.mix, g.selected.bpm);
             }
         } else {
-            p.rect(x, y, w, h, col::BG);
-            p.frame(x, y, w, h, 1.0, col::PANEL2);
-            p.text(x + 16.0, y + h / 2.0, ing.name, 18.0, col::FAINT, Align::Left);
-            let hint = if i == g.progress.ingredients {
-                if unlocked_mask == 0 {
-                    "unlock: pass basic at 80+ BPM".to_string()
+            p.dashed_frame(x, y, w, h, col::LINE);
+            p.dashed_ring(x + 24.0, y + h / 2.0, 6.0, col::FAINT);
+            p.text(x + 40.0, y + h / 2.0 - 1.0, short, 16.0, col::FAINT, Align::Left);
+            if hint.is_none() && i == g.progress.ingredients {
+                hint = Some(if unlocked_mask == 0 {
+                    format!("{} opens after a pass with the basic mix at 80+ BPM.", ing.name)
                 } else {
-                    format!("unlock: pass with all {} on, 80+ BPM", unlocked_mask.count_ones())
-                }
-            } else {
-                "locked".into()
-            };
-            p.text(x, y + h + 14.0, fit(&hint, w, 11.0), 11.0, col::FAINT, Align::Left);
+                    format!("{} opens after a pass with {} at 80+ BPM.", ing.name, ingredient_list(unlocked_mask))
+                });
+            }
         }
-        p.text(x, y - 12.0, fit(ing.about, w, 10.0), 10.0, col::FAINT, Align::Left);
+        x += w + 10.0;
+    }
+    if let Some(h) = hint {
+        p.text(RX, 296.0, fit(&h, 680.0, 13.0), 13.0, col::DIM, Align::Left);
     }
 
-    // ---------- BPM nodes for the toggled combination
-    let mix = g.mix;
+    // ---------- tempo row
+    p.label(RX, 352.0, "tempo \u{b7} bpm");
     let bpms: Vec<u32> = bpm_steps().collect();
-    p.label(32.0, NODE_Y - 70.0, &format!("{}  -  tempo", mask_name(mix)));
+    let r = 26.0;
+    let cy = 402.0;
     for &b in &bpms {
         if b + BPM_STEP > BPM_MAX {
             continue;
         }
-        let (l, r) = (Level::run(mix, b), Level::run(mix, b + BPM_STEP));
-        let c = if g.progress.passed(&l) || g.progress.passed(&r) {
-            col::BRASS
-        } else if g.progress.is_unlocked(&l) && g.progress.is_unlocked(&r) {
-            col::LINE
+        let (l, rr) = (Level::run(mix, b), Level::run(mix, b + BPM_STEP));
+        let (x0, x1) = (node_x(b) + r, node_x(b + BPM_STEP) - r);
+        if g.progress.passed(&l) || g.progress.passed(&rr) {
+            p.rect(x0, cy - 0.75, x1 - x0, 1.5, col::ONTIME);
+        } else if g.progress.is_unlocked(&l) && g.progress.is_unlocked(&rr) {
+            p.rect(x0, cy - 0.5, x1 - x0, 1.0, col::LINE);
         } else {
-            col::PANEL2
-        };
-        p.rect(node_x(b) + R, NODE_Y - 1.0, 140.0 - 2.0 * R, 2.0, c);
+            let mut xx = x0 + 2.0;
+            while xx < x1 - 2.0 {
+                p.disc(xx, cy, 0.8, col::LINE);
+                xx += 6.0;
+            }
+        }
     }
     let mut clicked: Option<Level> = None;
     let mut hovered: Option<Level> = None;
     for &b in &bpms {
         let l = Level::run(mix, b);
-        let (x, y) = (node_x(b), NODE_Y);
+        let x = node_x(b);
         let open = g.progress.is_unlocked(&l);
+        let passed = g.progress.passed(&l);
         let best = g.progress.best(&l);
-        let hov = p.cursor.is_some_and(|c| (c.x - x).powi(2) + (c.y - y).powi(2) <= (R + 4.0).powi(2));
+        let hov = p.hover_circle(x, cy, r + 3.0);
         if hov {
             hovered = Some(l);
         }
         if g.selected == l {
-            p.disc(x, y, R + 6.0, col::TEXT);
-            p.disc(x, y, R + 3.0, col::BG);
-        }
-        if g.progress.passed(&l) {
-            p.disc(x, y, R, col::BRASS);
-            p.text(x, y, format!("{:.0}", best.unwrap_or(0.0)), 20.0, col::BG, Align::Center);
+            p.disc(x, cy, r, col::TEXT);
+            p.serif(x, cy - 2.0, format!("{b}"), 22.0, col::BG, Align::Center);
+        } else if passed {
+            p.disc(x, cy, r, col::TEAL_TINT);
+            p.ring(x, cy, r, col::ONTIME);
+            p.serif(x, cy - 2.0, format!("{b}"), 22.0, col::ONTIME, Align::Center);
         } else if open {
-            p.disc(x, y, R, if hov { col::TEXT } else { col::DIM });
-            p.disc(x, y, R - 2.0, if hov { col::PANEL2 } else { col::PANEL });
-            if let Some(s) = best {
-                p.text(x, y, format!("{s:.0}"), 20.0, col::TEXT, Align::Center);
+            if hov {
+                p.disc(x, cy, r, col::PANEL);
             }
+            p.ring(x, cy, r, col::TEXT);
+            p.serif(x, cy - 2.0, format!("{b}"), 22.0, col::TEXT, Align::Center);
         } else {
-            p.disc(x, y, R * 0.35, col::LINE);
+            p.dashed_ring(x, cy, r, col::LINE);
+            p.serif(x, cy - 2.0, format!("{b}"), 22.0, col::FAINT, Align::Center);
         }
         if g.progress.fresh.contains(&l.key()) {
-            p.disc(x + R * 0.75, y - R * 0.75, 5.0, col::BRASS);
+            p.disc(x + r * 0.75, cy - r * 0.75, 4.0, col::OCHRE);
         }
-        p.text(x, y + R + 18.0, format!("{b}"), 16.0, if open { col::DIM } else { col::FAINT }, Align::Center);
+        let below = if !open {
+            "locked".to_string()
+        } else if let Some(s) = best {
+            format!("{s:.0}%")
+        } else {
+            "open".into()
+        };
+        p.text(x, cy + 42.0, below, 13.0, if passed { col::ONTIME } else { col::DIM }, Align::Center);
         if hov && p.clicked && open {
             clicked = Some(l);
         }
     }
-    p.text(node_x(BPM_MAX) + R + 14.0, NODE_Y + R + 18.0, "BPM", 11.0, col::FAINT, Align::Left);
 
-    // ---------- drills fitting the toggled combination, at the selected tempo
-    let bpm = g.selected.bpm;
-    let drills: Vec<usize> =
-        (0..PATTERNS.len()).filter(|&i| !is_riff_continuation(i) && PATTERNS[i].drill_needs() & !mix == 0).collect();
-    let dy0 = 470.0;
-    p.label(32.0, dy0, &format!("drills at {bpm} BPM"));
-    let (cw, chh, per_row) = (224.0, 30.0, 6usize);
-    for (k, &pi) in drills.iter().enumerate() {
-        let d = Level::drill(pi, bpm);
-        let (cx, cy) = (32.0 + (k % per_row) as f32 * (cw + 6.0), dy0 + 16.0 + (k / per_row) as f32 * (chh + 5.0));
+    // ---------- play button
+    let sel = g.selected;
+    let can_play = g.progress.is_unlocked(&sel);
+    let (main, sub) = match sel.kind {
+        LevelKind::Run(m) => {
+            (format!("Play {} BPM", sel.bpm), if m == 0 { "basic".to_string() } else { format!("with {}", ingredient_list(m)) })
+        }
+        LevelKind::Drill(pi) => (format!("Drill {} BPM", sel.bpm), PATTERNS[pi].name.to_string()),
+    };
+    let (bx, by, bh) = (RX, 488.0, 56.0);
+    let main_w = main.len() as f32 * 12.6;
+    let bw = 52.0 + main_w + sub.len() as f32 * 6.8;
+    let hov = p.hover(bx, by, bw, bh);
+    p.rect(bx, by, bw, bh, if !can_play { col::FAINT } else if hov { col::DIM } else { col::TEXT });
+    p.serif(bx + 26.0, by + bh / 2.0 - 3.0, &main, 28.0, col::BG, Align::Left);
+    p.text(bx + 36.0 + main_w, by + bh / 2.0 + 3.0, &sub, 13.0, col::BG, Align::Left);
+    if can_play && (p.hit(bx, by, bw, bh) || keys.just_pressed(KeyCode::Enter)) {
+        g.start_level(sel, false);
+        return;
+    }
+
+    // ---------- stages strip
+    p.hline(120.0, 634.0, 1200.0, col::LINE);
+    p.label(120.0, 670.0, "the guru's stages");
+    for s in 1..=5u32 {
+        let x = 120.0 + (s - 1) as f32 * 135.0;
+        let still = mascot::pose(s, None, false);
+        mascot::draw(p, imgs, x + 12.0, 688.0, 0.42, s, Mood::Neutral, &still);
+        p.text(x + 62.0, 832.0, STAGE_NAMES[s as usize], 13.0, col::TEXT, Align::Center);
+        if s == stage {
+            p.rect(x, 850.0, 125.0, 2.0, col::OCHRE);
+        }
+    }
+
+    // ---------- drills (fit the toggled ingredients, at the selected tempo)
+    let (dx, dw) = (843.0, 477.0);
+    p.label(dx, 670.0, &format!("drills \u{b7} {} bpm", sel.bpm));
+    let drills: Vec<usize> = (0..PATTERNS.len()).filter(|&i| !is_riff_continuation(i) && PATTERNS[i].drill_needs() & !mix == 0).collect();
+    let (row_h, visible) = (40.0, 5usize);
+    let max_first = drills.len().saturating_sub(visible);
+    if p.hover(dx, 686.0, dw, row_h * visible as f32) && p.scroll != 0.0 {
+        let cur = (g.scroll / row_h) as usize;
+        let next = if p.scroll < 0.0 { (cur + 1).min(max_first) } else { cur.saturating_sub(1) };
+        g.scroll = next as f32 * row_h;
+    }
+    let first = ((g.scroll / row_h) as usize).min(max_first);
+    for (k, &pi) in drills.iter().skip(first).take(visible).enumerate() {
+        let d = Level::drill(pi, sel.bpm);
+        let y = 686.0 + k as f32 * row_h;
         let open = g.progress.is_unlocked(&d);
-        let best = g.progress.best(&d).map_or(String::new(), |b| format!("{b:.0}"));
-        let hov = p.hover(cx, cy, cw, chh);
+        let hov = p.hover(dx, y, dw, row_h);
         if hov {
             hovered = Some(d);
+            p.rect(dx, y, dw, row_h - 1.0, col::PANEL);
         }
-        let sel = g.selected == d;
-        p.rect(cx, cy, cw, chh, if sel || hov { col::PANEL2 } else { col::PANEL });
-        p.frame(cx, cy, cw, chh, 1.0, if sel { col::TEXT } else if g.progress.passed(&d) { col::BRASS } else { col::LINE });
-        let c = if !open {
-            col::FAINT
-        } else if g.progress.passed(&d) {
-            col::BRASS
-        } else {
-            col::DIM
-        };
-        p.text(cx + 8.0, cy + chh / 2.0, fit(PATTERNS[pi].name, cw - 46.0, 13.0), 13.0, c, Align::Left);
-        p.text(cx + cw - 8.0, cy + chh / 2.0, best, 13.0, c, Align::Right);
+        if g.selected == d {
+            p.rect(dx - 10.0, y + 8.0, 2.0, row_h - 16.0, col::OCHRE);
+        }
+        let c = if open { col::TEXT } else { col::FAINT };
+        p.styled(dx, y + row_h / 2.0, fit(PATTERNS[pi].name, dw - 150.0, 16.0), 16.0, c, Align::Left, Font::SansMedium, 0.0);
+        p.text(dx + dw - 48.0, y + row_h / 2.0 + 2.0, if open { format!("{} BPM", sel.bpm) } else { "locked".into() }, 12.0, col::DIM, Align::Right);
+        let best = g.progress.best(&d).map_or("\u{2013}".to_string(), |b| format!("{b:.0}"));
+        p.serif(dx + dw, y + row_h / 2.0 - 2.0, best, 22.0, if g.progress.passed(&d) { col::ONTIME } else { col::TEXT }, Align::Right);
+        p.hline(dx, y + row_h - 1.0, dw, col::LINE);
         if hov && p.clicked && open {
             clicked = Some(d);
         }
+    }
+    if drills.len() > visible {
+        p.text(dx + dw, 670.0, format!("{}\u{2013}{} of {} \u{b7} scroll", first + 1, (first + visible).min(drills.len()), drills.len()), 11.0, col::FAINT, Align::Right);
     }
 
     if let Some(l) = clicked {
@@ -166,8 +297,6 @@ pub fn draw(g: &mut Game, p: &mut Paint, keys: &ButtonInput<KeyCode>) {
         }
         g.selected = l;
     }
-
-    // Keyboard: left/right change tempo, Enter plays the selection.
     let mut b = g.selected.bpm;
     if keys.just_pressed(KeyCode::ArrowRight) {
         b = (b + BPM_STEP).min(BPM_MAX);
@@ -181,41 +310,21 @@ pub fn draw(g: &mut Game, p: &mut Paint, keys: &ButtonInput<KeyCode>) {
             g.selected = l;
         }
     }
-    if keys.just_pressed(KeyCode::Enter) && g.progress.is_unlocked(&g.selected) {
-        g.start_level(g.selected, false);
-        return;
-    }
 
-    // ---------- info line about the hovered (else selected) level, and Play
-    let l = hovered.unwrap_or(g.selected);
-    let mut info = format!("{}  {} BPM", l.name(), l.bpm);
-    if !g.progress.is_unlocked(&l) {
-        info.push_str("   locked");
-    } else if let Some(h) = g.progress.best_entry(&l.key()) {
-        info.push_str(&format!("   best {:.0} %   sd {:.1} ms   attack {:.1} dB", h.combined, h.spread_ms, h.level_std_db));
+    // ---------- status lines
+    if let Some(l) = hovered
+        && let Some(h) = g.progress.best_entry(&l.key())
+    {
+        let pass = if h.combined >= PASS_THRESHOLD { "passed" } else { "not passed yet" };
+        p.text(RX, 578.0, format!("{} {} BPM \u{b7} best {:.0}% ({pass}) \u{b7} evenness {:.1} ms", l.name(), l.bpm, h.combined, h.spread_ms), 13.0, col::DIM, Align::Left);
     }
-    if let LevelKind::Drill(pi) = l.kind {
-        pattern_glyph(p, 32.0, 834.0, 200.0, 16.0, &PATTERNS[pi], col::BRASS);
-    } else {
-        p.text(32.0, 842.0, format!("quarters, then {}-bar sections", crate::patterns::SEGMENT_BARS), 12.0, col::FAINT, Align::Left);
-    }
-    p.text(260.0, 842.0, fit(&info, 840.0, 17.0), 17.0, col::TEXT, Align::Left);
-    if g.progress.is_unlocked(&g.selected) && p.button(1250.0, 818.0, 158.0, 46.0, "Play", true) {
-        g.start_level(g.selected, false);
-        return;
-    }
-
     if let Some((msg, bad)) = g.input_problem() {
-        p.text(32.0, 884.0, truncate(&msg, 120), 13.0, if bad { col::MISS } else { col::LATE }, Align::Left);
-        if p.button(1130.0, 818.0, 108.0, 46.0, "Retry", false) {
+        p.text(RX, 604.0, fit(&msg, 560.0, 13.0), 13.0, if bad { col::LATE } else { col::DIM }, Align::Left);
+        if link(p, 1320.0, 604.0, "Retry") {
             g.restart_engine();
         }
     }
     if let Some(m) = &g.message {
-        p.text(1408.0, 800.0, m.clone(), 14.0, col::MISS, Align::Right);
+        p.text(RX, 620.0, m.clone(), 13.0, col::LATE, Align::Left);
     }
-}
-
-pub fn truncate(s: &str, n: usize) -> String {
-    if s.chars().count() <= n { s.to_string() } else { s.chars().take(n - 1).collect::<String>() + "~" }
 }

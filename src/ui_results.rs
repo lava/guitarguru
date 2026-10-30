@@ -10,7 +10,7 @@ use crate::session::Window;
 use crate::ui_common::*;
 use crate::ui_menu::truncate;
 
-pub fn draw(g: &mut Game, p: &mut Paint) {
+pub fn draw(g: &mut Game, p: &mut Paint, _imgs: &crate::mascot::MascotImages) {
     let Some(r) = &g.results else {
         g.screen = Screen::Menu;
         return;

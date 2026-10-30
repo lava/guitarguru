@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-bevy = { version = "0.20.1", default-features = false, features = ["2d", "ui"] }
+bevy = { version = "0.20.1", default-features = false, features = ["2d", "ui", "png"] }
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 cpal = { version = "0.18.2", features = ["pulseaudio"] }
 directories = "6.0.0"

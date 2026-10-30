@@ -1,13 +1,18 @@
 //! A tiny immediate-mode painter on top of Bevy: each frame the game pushes rectangles,
-//! discs, triangles, text and lines in a fixed 1440x900 design space (origin top-left,
-//! y down); `flush` maps them onto pooled sprites / Text2d entities / gizmos. Buttons are
-//! hit-tested against the cursor. This keeps every screen a plain function of game state.
+//! discs, petals, images, text, lines and circles in a fixed 1440x900 design space (origin
+//! top-left, y down); `flush` maps them onto pooled sprites / Text2d entities / gizmos.
+//! Buttons are hit-tested against the cursor. Every screen is a plain function of game
+//! state. `offset_y` scrolls everything drawn afterwards; `fade` scales all alpha.
+//!
+//! Style ("Guitar Guru"): warm paper, ink lines, one ochre accent, gold for ornament,
+//! Cormorant Garamond for display and numbers, Mukta for text.
 
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::ScalingMode;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::sprite::Anchor;
+use bevy::text::{FontFeatureTag, FontFeatures, FontStyle, FontWeight, LetterSpacing};
 use bevy::window::PrimaryWindow;
 
 pub const W: f32 = 1440.0;
@@ -18,20 +23,30 @@ pub mod col {
     const fn hex(r: u8, g: u8, b: u8) -> Color {
         Color::srgb(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0)
     }
-    pub const BG: Color = hex(0x0e, 0x11, 0x14);
-    pub const PANEL: Color = hex(0x16, 0x1b, 0x20);
-    pub const PANEL2: Color = hex(0x1c, 0x23, 0x2a);
-    pub const LINE: Color = hex(0x2a, 0x33, 0x3c);
-    pub const TEXT: Color = hex(0xec, 0xe8, 0xde);
-    pub const DIM: Color = hex(0x8b, 0x8f, 0x8f);
-    pub const FAINT: Color = hex(0x55, 0x5c, 0x62);
-    pub const BRASS: Color = hex(0xd1, 0xa1, 0x4a);
-    pub const EARLY: Color = hex(0x3d, 0x8a, 0xe6);
-    pub const LATE: Color = hex(0xe0, 0x70, 0x3a);
-    pub const MISS: Color = hex(0xe0, 0x52, 0x52);
-    pub const TONE: Color = hex(0x90, 0x85, 0xe9);
-    pub const GOOD: Color = hex(0x5c, 0xb8, 0x6c);
-    pub const BAD: Color = hex(0xd9, 0x77, 0x6f);
+    /// Paper.
+    pub const BG: Color = hex(0xf6, 0xef, 0xe2);
+    pub const PANEL: Color = hex(0xef, 0xe5, 0xd3);
+    pub const PANEL2: Color = hex(0xe9, 0xdd, 0xc7);
+    /// Hairlines.
+    pub const LINE: Color = hex(0xd9, 0xcc, 0xb6);
+    /// Ink.
+    pub const TEXT: Color = hex(0x2b, 0x21, 0x1a);
+    pub const DIM: Color = hex(0x5e, 0x4e, 0x40);
+    pub const FAINT: Color = hex(0x7a, 0x6a, 0x5a);
+    /// The single UI accent (selection, playhead, primary).
+    pub const BRASS: Color = hex(0xc2, 0x7a, 0x2c);
+    pub const OCHRE: Color = BRASS;
+    pub const OCHRE_TINT: Color = hex(0xf0, 0xd9, 0xb5);
+    /// Ornament only.
+    pub const GOLD: Color = hex(0xb8, 0x91, 0x4a);
+    pub const EARLY: Color = hex(0x3a, 0x4a, 0x8c);
+    pub const ONTIME: Color = hex(0x1f, 0x7a, 0x6e);
+    pub const TEAL_TINT: Color = hex(0xd6, 0xe8, 0xe2);
+    pub const LATE: Color = hex(0xb5, 0x45, 0x2f);
+    pub const MISS: Color = LATE;
+    pub const TONE: Color = hex(0x7b, 0x4a, 0x9a);
+    pub const GOOD: Color = ONTIME;
+    pub const BAD: Color = LATE;
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -40,15 +55,26 @@ pub enum Shape {
     Disc,
     /// Triangle pointing right (rotated by `rot`).
     Tri,
+    /// A pointed leaf (mandala petal), long axis vertical.
+    Petal,
+    Grain,
+}
+
+#[derive(Clone)]
+enum Tex {
+    Shape(Shape),
+    Image(Handle<Image>),
 }
 
 struct ShapeCmd {
-    shape: Shape,
+    tex: Tex,
     center: Vec2,
     size: Vec2,
     color: Color,
     /// Rotation in radians, counter-clockwise on screen.
     rot: f32,
+    /// Pivot within the sprite, -0.5..0.5 (x right, y up).
+    anchor: Vec2,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -58,36 +84,79 @@ pub enum Align {
     Right,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Font {
+    /// Cormorant Garamond.
+    Serif,
+    SerifItalic,
+    /// Mukta.
+    Sans,
+    SansMedium,
+    SansBold,
+}
+
 struct TextCmd {
     text: String,
     pos: Vec2,
     size: f32,
     color: Color,
     align: Align,
+    font: Font,
+    spacing: f32,
 }
 
-struct LineCmd {
-    a: Vec2,
-    b: Vec2,
-    color: Color,
+enum LineCmd {
+    Line(Vec2, Vec2, Color),
+    Circle(Vec2, f32, Color),
 }
 
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub struct Paint {
     shapes: Vec<ShapeCmd>,
     texts: Vec<TextCmd>,
     lines: Vec<LineCmd>,
-    /// Cursor in design coordinates.
+    /// Cursor in design coordinates (screen space, not scrolled).
     pub cursor: Option<Vec2>,
     pub clicked: bool,
     pub mouse_down: bool,
     pub scroll: f32,
+    /// Added to every y coordinate drawn (negative = content scrolled up).
+    pub offset_y: f32,
+    /// Alpha multiplier for everything (screen fades).
+    pub fade: f32,
+}
+
+impl Default for Paint {
+    fn default() -> Self {
+        Self {
+            shapes: Vec::new(),
+            texts: Vec::new(),
+            lines: Vec::new(),
+            cursor: None,
+            clicked: false,
+            mouse_down: false,
+            scroll: 0.0,
+            offset_y: 0.0,
+            fade: 1.0,
+        }
+    }
 }
 
 #[derive(Resource)]
 struct ShapeImages {
     disc: Handle<Image>,
     tri: Handle<Image>,
+    petal: Handle<Image>,
+    grain: Handle<Image>,
+}
+
+#[derive(Resource)]
+struct Fonts {
+    serif: Handle<bevy::text::Font>,
+    serif_italic: Handle<bevy::text::Font>,
+    sans: Handle<bevy::text::Font>,
+    sans_medium: Handle<bevy::text::Font>,
+    sans_bold: Handle<bevy::text::Font>,
 }
 
 #[derive(Component)]
@@ -96,12 +165,16 @@ struct PoolSprite;
 struct PoolText;
 
 impl Paint {
+    fn push(&mut self, tex: Tex, center: Vec2, size: Vec2, color: Color, rot: f32, anchor: Vec2) {
+        let center = Vec2::new(center.x, center.y + self.offset_y);
+        self.shapes.push(ShapeCmd { tex, center, size, color, rot, anchor });
+    }
     pub fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: Color) {
-        self.shapes.push(ShapeCmd { shape: Shape::Rect, center: Vec2::new(x + w / 2.0, y + h / 2.0), size: Vec2::new(w, h), color, rot: 0.0 });
+        self.push(Tex::Shape(Shape::Rect), Vec2::new(x + w / 2.0, y + h / 2.0), Vec2::new(w, h), color, 0.0, Vec2::ZERO);
     }
     /// Rectangle centred at (cx, cy), rotated by `rot` radians (counter-clockwise on screen).
     pub fn rot_rect(&mut self, cx: f32, cy: f32, w: f32, h: f32, rot: f32, color: Color) {
-        self.shapes.push(ShapeCmd { shape: Shape::Rect, center: Vec2::new(cx, cy), size: Vec2::new(w, h), color, rot });
+        self.push(Tex::Shape(Shape::Rect), Vec2::new(cx, cy), Vec2::new(w, h), color, rot, Vec2::ZERO);
     }
     /// Outline of width `t`.
     pub fn frame(&mut self, x: f32, y: f32, w: f32, h: f32, t: f32, color: Color) {
@@ -110,77 +183,198 @@ impl Paint {
         self.rect(x, y, t, h, color);
         self.rect(x + w - t, y, t, h, color);
     }
+    /// Dashed outline (locked things).
+    pub fn dashed_frame(&mut self, x: f32, y: f32, w: f32, h: f32, color: Color) {
+        let dash = 5.0f32;
+        let mut i = 0.0;
+        while i < w {
+            let l = dash.min(w - i);
+            self.rect(x + i, y, l, 1.0, color);
+            self.rect(x + i, y + h - 1.0, l, 1.0, color);
+            i += 2.0 * dash;
+        }
+        let mut i = 0.0;
+        while i < h {
+            let l = dash.min(h - i);
+            self.rect(x, y + i, 1.0, l, color);
+            self.rect(x + w - 1.0, y + i, 1.0, l, color);
+            i += 2.0 * dash;
+        }
+    }
+    pub fn hline(&mut self, x: f32, y: f32, w: f32, color: Color) {
+        self.rect(x, y, w, 1.0, color);
+    }
     pub fn disc(&mut self, cx: f32, cy: f32, r: f32, color: Color) {
-        self.shapes.push(ShapeCmd { shape: Shape::Disc, center: Vec2::new(cx, cy), size: Vec2::splat(2.0 * r), color, rot: 0.0 });
+        self.push(Tex::Shape(Shape::Disc), Vec2::new(cx, cy), Vec2::splat(2.0 * r), color, 0.0, Vec2::ZERO);
+    }
+    /// Thin ink circle outline.
+    pub fn ring(&mut self, cx: f32, cy: f32, r: f32, color: Color) {
+        self.lines.push(LineCmd::Circle(Vec2::new(cx, cy + self.offset_y), r, color));
+    }
+    /// Dashed circle outline.
+    pub fn dashed_ring(&mut self, cx: f32, cy: f32, r: f32, color: Color) {
+        let n = ((std::f32::consts::TAU * r) / 7.0).max(12.0) as usize;
+        for i in (0..n).step_by(2) {
+            let (a0, a1) = (std::f32::consts::TAU * i as f32 / n as f32, std::f32::consts::TAU * (i + 1) as f32 / n as f32);
+            self.line(cx + r * a0.cos(), cy + r * a0.sin(), cx + r * a1.cos(), cy + r * a1.sin(), color);
+        }
+    }
+    /// Ring of fine dots.
+    pub fn dotted_ring(&mut self, cx: f32, cy: f32, r: f32, dot: f32, color: Color) {
+        let n = ((std::f32::consts::TAU * r) / (dot * 4.0)).max(12.0) as usize;
+        for i in 0..n {
+            let a = std::f32::consts::TAU * i as f32 / n as f32;
+            self.disc(cx + r * a.cos(), cy + r * a.sin(), dot, color);
+        }
     }
     pub fn tri(&mut self, cx: f32, cy: f32, r: f32, right: bool, color: Color) {
         let rot = if right { 0.0 } else { std::f32::consts::PI };
-        self.shapes.push(ShapeCmd { shape: Shape::Tri, center: Vec2::new(cx, cy), size: Vec2::splat(2.0 * r), color, rot });
+        self.push(Tex::Shape(Shape::Tri), Vec2::new(cx, cy), Vec2::splat(2.0 * r), color, rot, Vec2::ZERO);
     }
-    /// Pick-direction arrow: a shaft with a triangular head, pointing down or up.
+    /// Mandala petal centred at (cx, cy), length `len`, width `w`, pointing at angle `rot`
+    /// (radians, 0 = up, counter-clockwise on screen).
+    pub fn petal(&mut self, cx: f32, cy: f32, len: f32, w: f32, rot: f32, color: Color) {
+        self.push(Tex::Shape(Shape::Petal), Vec2::new(cx, cy), Vec2::new(w, len), color, rot, Vec2::ZERO);
+    }
+    /// An image (e.g. a mascot layer). `pivot` is the point (in design units, absolute)
+    /// that `rot` and `scale` act around; the image's own pivot is `anchor` (-0.5..0.5).
+    #[allow(clippy::too_many_arguments)]
+    pub fn image(&mut self, img: &Handle<Image>, pivot: Vec2, size: Vec2, anchor: Vec2, rot: f32, color: Color) {
+        self.push(Tex::Image(img.clone()), pivot, size, color, rot, anchor);
+    }
+    /// Thin pick-direction arrow: a shaft with an open arrowhead (ink lines).
     pub fn stroke_arrow(&mut self, cx: f32, cy: f32, len: f32, down: bool, color: Color) {
-        let head = len * 0.42;
-        let shaft = len - head * 0.8;
-        let (sy, hy) = if down { (cy - len / 2.0, cy + len / 2.0 - head / 2.0) } else { (cy + len / 2.0 - shaft, cy - len / 2.0 + head / 2.0) };
-        self.rect(cx - len * 0.06, sy, len * 0.12, shaft, color);
-        let rot = if down { -std::f32::consts::FRAC_PI_2 } else { std::f32::consts::FRAC_PI_2 };
-        self.shapes.push(ShapeCmd { shape: Shape::Tri, center: Vec2::new(cx, hy), size: Vec2::splat(head), color, rot });
+        let (y0, y1) = (cy - len / 2.0, cy + len / 2.0);
+        let (tip, tail) = if down { (y1, y0) } else { (y0, y1) };
+        let head = (len * 0.28).clamp(4.0, 11.0);
+        let dir = if down { -1.0 } else { 1.0 };
+        for o in [-0.6f32, 0.0, 0.6] {
+            self.line(cx + o, tail, cx + o, tip, color);
+        }
+        for o in [0.0f32, 0.6] {
+            self.line(cx + o, tip, cx - head * 0.62 + o, tip + dir * head, color);
+            self.line(cx - o, tip, cx + head * 0.62 - o, tip + dir * head, color);
+        }
     }
     pub fn cross(&mut self, cx: f32, cy: f32, r: f32, color: Color) {
         self.line(cx - r, cy - r, cx + r, cy + r, color);
         self.line(cx - r, cy + r, cx + r, cy - r, color);
     }
     pub fn line(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, color: Color) {
-        self.lines.push(LineCmd { a: Vec2::new(x0, y0), b: Vec2::new(x1, y1), color });
+        let o = self.offset_y;
+        self.lines.push(LineCmd::Line(Vec2::new(x0, y0 + o), Vec2::new(x1, y1 + o), color));
     }
-    /// Text with its vertical centre at `y`.
+    /// Sans text with its vertical centre at `y`.
     pub fn text(&mut self, x: f32, y: f32, s: impl Into<String>, size: f32, color: Color, align: Align) {
-        self.texts.push(TextCmd { text: s.into(), pos: Vec2::new(x, y), size, color, align });
+        self.styled(x, y, s, size, color, align, Font::Sans, 0.0);
     }
+    /// Serif (display / numbers).
+    pub fn serif(&mut self, x: f32, y: f32, s: impl Into<String>, size: f32, color: Color, align: Align) {
+        self.styled(x, y, s, size, color, align, Font::Serif, 0.0);
+    }
+    pub fn italic(&mut self, x: f32, y: f32, s: impl Into<String>, size: f32, color: Color, align: Align) {
+        self.styled(x, y, s, size, color, align, Font::SerifItalic, 0.0);
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn styled(&mut self, x: f32, y: f32, s: impl Into<String>, size: f32, color: Color, align: Align, font: Font, spacing: f32) {
+        let pos = Vec2::new(x, y + self.offset_y);
+        self.texts.push(TextCmd { text: s.into(), pos, size, color, align, font, spacing });
+    }
+    /// Small uppercase letter-spaced label.
     pub fn label(&mut self, x: f32, y: f32, s: &str) {
-        self.text(x, y, s.to_uppercase(), 13.0, col::DIM, Align::Left);
+        self.styled(x, y, s.to_uppercase(), 11.0, col::DIM, Align::Left, Font::SansBold, 1.6);
     }
+    pub fn label_at(&mut self, x: f32, y: f32, s: &str, align: Align, color: Color) {
+        self.styled(x, y, s.to_uppercase(), 11.0, color, align, Font::SansBold, 1.6);
+    }
+    /// Is the cursor over this (scrolled) rectangle?
     pub fn hover(&self, x: f32, y: f32, w: f32, h: f32) -> bool {
+        let y = y + self.offset_y;
         self.cursor.is_some_and(|c| c.x >= x && c.x < x + w && c.y >= y && c.y < y + h)
+    }
+    pub fn hover_circle(&self, cx: f32, cy: f32, r: f32) -> bool {
+        let cy = cy + self.offset_y;
+        self.cursor.is_some_and(|c| (c.x - cx).powi(2) + (c.y - cy).powi(2) <= r * r)
     }
     pub fn hit(&self, x: f32, y: f32, w: f32, h: f32) -> bool {
         self.clicked && self.hover(x, y, w, h)
     }
-    /// A button; returns true when clicked. `primary` uses the brass accent.
+    /// A button; returns true when clicked. Primary = ink fill with paper text; secondary
+    /// = ink outline.
     pub fn button(&mut self, x: f32, y: f32, w: f32, h: f32, label: &str, primary: bool) -> bool {
         let hov = self.hover(x, y, w, h);
-        let (bg, fg) = if primary {
-            (if hov { col::TEXT } else { col::BRASS }, col::BG)
+        if primary {
+            self.rect(x, y, w, h, if hov { col::DIM } else { col::TEXT });
+            self.serif(x + w / 2.0, y + h / 2.0 - 2.0, label, (h * 0.46).min(24.0), col::BG, Align::Center);
         } else {
-            (if hov { col::LINE } else { col::PANEL2 }, col::TEXT)
-        };
-        self.rect(x, y, w, h, bg);
-        if !primary {
-            self.frame(x, y, w, h, 1.0, col::LINE);
+            if hov {
+                self.rect(x, y, w, h, col::PANEL);
+            }
+            self.frame(x, y, w, h, 1.2, col::TEXT);
+            self.serif(x + w / 2.0, y + h / 2.0 - 2.0, label, (h * 0.46).min(22.0), col::TEXT, Align::Center);
         }
-        self.text(x + w / 2.0, y + h / 2.0, label, 18.0, fg, Align::Center);
         self.hit(x, y, w, h)
     }
-    /// A selectable row/chip; returns true when clicked.
-    pub fn choice(&mut self, x: f32, y: f32, w: f32, h: f32, label: &str, selected: bool) -> bool {
+    /// Round icon button (outline circle) with a short glyph; returns true when clicked.
+    pub fn round_button(&mut self, cx: f32, cy: f32, r: f32, glyph: &str) -> bool {
+        let hov = self.hover_circle(cx, cy, r);
+        if hov {
+            self.disc(cx, cy, r, col::PANEL);
+        }
+        self.ring(cx, cy, r, col::TEXT);
+        match glyph {
+            "x" => self.cross(cx, cy, r * 0.22, col::TEXT),
+            "flag" => {
+                let (x, y, h) = (cx - r * 0.18, cy - r * 0.3, r * 0.6);
+                self.line(x, y, x, y + h, col::TEXT);
+                self.line(x, y, x + r * 0.4, y, col::TEXT);
+                self.line(x + r * 0.4, y, x + r * 0.4, y + h * 0.45, col::TEXT);
+                self.line(x, y + h * 0.45, x + r * 0.4, y + h * 0.45, col::TEXT);
+            }
+            "play" => self.tri(cx + r * 0.08, cy, r * 0.3, true, col::TEXT),
+            "stop" => self.rect(cx - r * 0.22, cy - r * 0.22, r * 0.44, r * 0.44, col::TEXT),
+            "-" => self.rect(cx - r * 0.3, cy - 0.6, r * 0.6, 1.2, col::TEXT),
+            "+" => {
+                self.rect(cx - r * 0.3, cy - 0.6, r * 0.6, 1.2, col::TEXT);
+                self.rect(cx - 0.6, cy - r * 0.3, 1.2, r * 0.6, col::TEXT);
+            }
+            g => self.text(cx, cy - 1.0, g, r * 0.8, col::TEXT, Align::Center),
+        }
+        self.clicked && hov
+    }
+    /// A hairline list row with a radio dot; returns true when clicked.
+    pub fn radio_row(&mut self, x: f32, y: f32, w: f32, h: f32, label: &str, note: &str, selected: bool) -> bool {
         let hov = self.hover(x, y, w, h);
-        self.rect(x, y, w, h, if selected { col::PANEL2 } else if hov { col::PANEL } else { col::BG });
-        self.frame(x, y, w, h, 1.0, if selected { col::BRASS } else { col::LINE });
-        let label = fit(label, w - 16.0, 16.0);
-        self.text(x + 10.0, y + h / 2.0, label, 16.0, if selected { col::TEXT } else { col::DIM }, Align::Left);
-        self.hit(x, y, w, h)
+        if hov {
+            self.rect(x, y, w, h - 1.0, col::PANEL);
+        }
+        let cy = y + h / 2.0;
+        if selected {
+            self.disc(x + 8.0, cy, 6.0, col::OCHRE);
+        } else {
+            self.ring(x + 8.0, cy, 6.0, col::DIM);
+        }
+        let font = if selected { Font::SansBold } else { Font::Sans };
+        self.styled(x + 26.0, cy - 1.0, fit(label, w - 140.0, 15.0), 15.0, col::TEXT, Align::Left, font, 0.0);
+        self.text(x + w - 2.0, cy - 1.0, fit(note, 120.0, 12.0), 12.0, col::FAINT, Align::Right);
+        self.hline(x, y + h - 1.0, w, col::LINE);
+        self.clicked && hov
+    }
+    /// A selectable row/chip (compat with older screens): radio row without note.
+    pub fn choice(&mut self, x: f32, y: f32, w: f32, h: f32, label: &str, selected: bool) -> bool {
+        self.radio_row(x, y, w, h, label, "", selected)
     }
     pub fn panel(&mut self, x: f32, y: f32, w: f32, h: f32) {
-        self.rect(x, y, w, h, col::PANEL);
-        self.frame(x, y, w, h, 1.0, col::LINE);
+        self.hline(x, y, w, col::LINE);
+        let _ = h;
     }
 }
 
-/// Truncate `s` to fit `w` design pixels at font `size` (the default font is monospaced,
-/// ~0.6 em per glyph).
+/// Truncate `s` to fit `w` design pixels at font `size` (proportional fonts, ~0.5 em per
+/// glyph on average).
 pub fn fit(s: &str, w: f32, size: f32) -> String {
-    let n = (w / (size * 0.61)).floor().max(2.0) as usize;
-    if s.chars().count() <= n { s.to_string() } else { s.chars().take(n - 1).collect::<String>() + "~" }
+    let n = (w / (size * 0.52)).floor().max(2.0) as usize;
+    if s.chars().count() <= n { s.to_string() } else { s.chars().take(n - 1).collect::<String>() + "\u{2026}" }
 }
 
 fn to_world(p: Vec2) -> Vec2 {
@@ -203,7 +397,6 @@ fn shape_image(size: u32, f: impl Fn(f32, f32) -> f32) -> Image {
     let mut data = Vec::with_capacity((size * size * 4) as usize);
     for y in 0..size {
         for x in 0..size {
-            // coverage via 4x4 supersampling
             let mut cov = 0.0;
             for sy in 0..4 {
                 for sx in 0..4 {
@@ -225,24 +418,61 @@ fn shape_image(size: u32, f: impl Fn(f32, f32) -> f32) -> Image {
     )
 }
 
-fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
+/// Faint paper grain: low-alpha ink speckle, tiled over the background.
+fn grain_image(size: u32) -> Image {
+    let mut seed: u32 = 0x1234_5678;
+    let mut data = Vec::with_capacity((size * size * 4) as usize);
+    for _ in 0..size * size {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        let r = (seed % 1000) as f32 / 1000.0;
+        let a = if r > 0.985 { 26 } else if r > 0.9 { 9 } else { 0 };
+        data.extend_from_slice(&[43, 33, 26, a]);
+    }
+    Image::new(
+        Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    )
+}
+
+fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>, assets: Res<AssetServer>, mut gizmo_cfg: ResMut<GizmoConfigStore>) {
     commands.spawn((
         Camera2d,
-        // No MSAA: shapes come from pre-antialiased textures; saves a lot of GPU memory
-        // at 2x scale factor.
+        // No MSAA: shapes come from pre-antialiased textures; saves a lot of GPU memory.
         Msaa::Off,
         Projection::Orthographic(OrthographicProjection {
             scaling_mode: ScalingMode::AutoMin { min_width: W, min_height: H },
             ..OrthographicProjection::default_2d()
         }),
     ));
-    let disc = images.add(shape_image(64, |u, v| {
+    let (cfg, _) = gizmo_cfg.config_mut::<DefaultGizmoConfigGroup>();
+    cfg.line.width = 2.4;
+    let disc = images.add(shape_image(128, |u, v| {
         let (dx, dy) = (u - 0.5, v - 0.5);
         if dx * dx + dy * dy <= 0.25 { 1.0 } else { 0.0 }
     }));
-    // Right-pointing triangle: apex at (1, 0.5), base at x = 0.
     let tri = images.add(shape_image(64, |u, v| if (v - 0.5).abs() <= 0.5 * (1.0 - u) { 1.0 } else { 0.0 }));
-    commands.insert_resource(ShapeImages { disc, tri });
+    // Petal: two circular arcs meeting in points at top and bottom.
+    let petal = images.add(shape_image(96, |u, v| {
+        let (x, y) = ((u - 0.5) * 2.0, (v - 0.5) * 2.0);
+        // lens: |x| <= w(y), w(y) = sqrt(R^2 - y^2) - (R - 1), R chosen so w(0) = 1
+        let r = 1.0f32;
+        let w = (r * r - y * y).max(0.0).sqrt() - (r - 1.0);
+        if x.abs() <= w * 0.98 { 1.0 } else { 0.0 }
+    }));
+    let grain = images.add(grain_image(256));
+    commands.insert_resource(ShapeImages { disc, tri, petal, grain });
+    commands.insert_resource(Fonts {
+        serif: assets.load("fonts/CormorantGaramond.ttf"),
+        serif_italic: assets.load("fonts/CormorantGaramond-Italic.ttf"),
+        sans: assets.load("fonts/Mukta-Regular.ttf"),
+        sans_medium: assets.load("fonts/Mukta-Medium.ttf"),
+        sans_bold: assets.load("fonts/Mukta-SemiBold.ttf"),
+    });
 }
 
 fn begin_frame(
@@ -255,6 +485,7 @@ fn begin_frame(
     paint.shapes.clear();
     paint.texts.clear();
     paint.lines.clear();
+    paint.offset_y = 0.0;
     paint.cursor = None;
     if let (Ok(win), Ok((cam, gt))) = (windows.single(), cams.single())
         && let Some(c) = win.cursor_position()
@@ -264,57 +495,100 @@ fn begin_frame(
     }
     paint.clicked = mouse.just_pressed(MouseButton::Left);
     paint.mouse_down = mouse.pressed(MouseButton::Left);
-    paint.scroll = wheel.read().map(|e| e.y).sum();
+    paint.scroll = wheel
+        .read()
+        .map(|e| match e.unit {
+            bevy::input::mouse::MouseScrollUnit::Line => e.y * 40.0,
+            bevy::input::mouse::MouseScrollUnit::Pixel => e.y,
+        })
+        .sum();
+    // Paper grain under everything.
+    for gy in 0..4 {
+        for gx in 0..6 {
+            paint.shapes.push(ShapeCmd {
+                tex: Tex::Shape(Shape::Grain),
+                center: Vec2::new(128.0 + gx as f32 * 256.0, 128.0 + gy as f32 * 256.0),
+                size: Vec2::splat(256.0),
+                color: Color::WHITE,
+                rot: 0.0,
+                anchor: Vec2::ZERO,
+            });
+        }
+    }
 }
 
-#[allow(clippy::too_many_arguments)]
+fn make_font(handle: &Handle<bevy::text::Font>, size: f32, weight: FontWeight, style: FontStyle) -> TextFont {
+    let mut f = TextFont::from(handle.clone()).with_font_size(size).with_font_weight(weight);
+    f.style = style;
+    // Lining figures (Cormorant defaults to old-style numerals).
+    f.font_features = FontFeatures::builder().enable(FontFeatureTag::LINING_FIGURES).build();
+    f
+}
+
+fn faded(c: Color, k: f32) -> Color {
+    if k >= 0.999 {
+        return c;
+    }
+    let a = c.alpha();
+    c.with_alpha(a * k)
+}
+
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn flush(
     mut commands: Commands,
     mut paint: ResMut<Paint>,
     images: Res<ShapeImages>,
-    mut sprites: Query<(&mut Sprite, &mut Transform, &mut Visibility), (With<PoolSprite>, Without<PoolText>)>,
+    fonts: Res<Fonts>,
+    mut sprites: Query<(&mut Sprite, &mut Transform, &mut Visibility, &mut Anchor), (With<PoolSprite>, Without<PoolText>)>,
     mut texts: Query<
-        (&mut Text2d, &mut TextFont, &mut TextColor, &mut Anchor, &mut Transform, &mut Visibility),
+        (&mut Text2d, &mut TextFont, &mut TextColor, &mut Anchor, &mut Transform, &mut LetterSpacing),
         (With<PoolText>, Without<PoolSprite>),
     >,
     mut gizmos: Gizmos,
 ) {
     let paint = &mut *paint;
-    // Shapes
+    let k = paint.fade.clamp(0.0, 1.0);
     let mut it = sprites.iter_mut();
     for (i, s) in paint.shapes.iter().enumerate() {
         let z = i as f32 * 0.0005;
-        let image = match s.shape {
-            Shape::Rect => Handle::default(),
-            Shape::Disc => images.disc.clone(),
-            Shape::Tri => images.tri.clone(),
+        let image = match &s.tex {
+            Tex::Shape(Shape::Rect) => Handle::default(),
+            Tex::Shape(Shape::Disc) => images.disc.clone(),
+            Tex::Shape(Shape::Tri) => images.tri.clone(),
+            Tex::Shape(Shape::Petal) => images.petal.clone(),
+            Tex::Shape(Shape::Grain) => images.grain.clone(),
+            Tex::Image(h) => h.clone(),
         };
         let pos = to_world(s.center).extend(z);
+        let anchor = Anchor(s.anchor);
+        let color = if matches!(s.tex, Tex::Shape(Shape::Grain)) { s.color } else { faded(s.color, k) };
         match it.next() {
-            Some((mut sp, mut tf, mut vis)) => {
+            Some((mut sp, mut tf, mut vis, mut anc)) => {
                 if sp.image != image {
                     sp.image = image;
                 }
-                sp.color = s.color;
+                sp.color = color;
                 sp.custom_size = Some(s.size);
                 tf.translation = pos;
                 tf.rotation = Quat::from_rotation_z(s.rot);
+                if *anc != anchor {
+                    *anc = anchor;
+                }
                 *vis = Visibility::Visible;
             }
             None => {
-                let mut sp = Sprite::from_color(s.color, s.size);
+                let mut sp = Sprite::from_color(color, s.size);
                 sp.image = image;
                 let tf = Transform::from_translation(pos).with_rotation(Quat::from_rotation_z(s.rot));
-                commands.spawn((sp, tf, Visibility::Visible, PoolSprite));
+                commands.spawn((sp, tf, anchor, Visibility::Visible, PoolSprite));
             }
         }
     }
-    for (_, _, mut vis) in it {
+    for (_, _, mut vis, _) in it {
         if *vis != Visibility::Hidden {
             *vis = Visibility::Hidden;
         }
     }
-    // Texts
     let mut it = texts.iter_mut();
     for t in &paint.texts {
         let anchor = match t.align {
@@ -322,17 +596,27 @@ fn flush(
             Align::Center => Anchor::CENTER,
             Align::Right => Anchor::CENTER_RIGHT,
         };
+        let (handle, weight, style) = match t.font {
+            Font::Serif => (&fonts.serif, FontWeight(500), FontStyle::Normal),
+            Font::SerifItalic => (&fonts.serif_italic, FontWeight(400), FontStyle::Italic),
+            Font::Sans => (&fonts.sans, FontWeight(400), FontStyle::Normal),
+            Font::SansMedium => (&fonts.sans_medium, FontWeight(500), FontStyle::Normal),
+            Font::SansBold => (&fonts.sans_bold, FontWeight(600), FontStyle::Normal),
+        };
         let pos = to_world(t.pos).extend(10.0);
+        let color = faded(t.color, k);
+        let spacing = LetterSpacing::Px(t.spacing);
         match it.next() {
-            Some((mut tx, mut font, mut color, mut anc, mut tf, mut vis)) => {
+            Some((mut tx, mut font, mut tc, mut anc, mut tf, mut ls)) => {
                 if tx.0 != t.text {
                     tx.0.clone_from(&t.text);
                 }
-                if font.font_size != FontSize::Px(t.size) {
-                    font.font_size = FontSize::Px(t.size);
+                let want = TextFont::from(handle.clone()).with_font_size(t.size).with_font_weight(weight);
+                if font.font != want.font || font.font_size != want.font_size || font.weight != weight || font.style != style {
+                    *font = make_font(handle, t.size, weight, style);
                 }
-                if color.0 != t.color {
-                    color.0 = t.color;
+                if tc.0 != color {
+                    tc.0 = color;
                 }
                 if *anc != anchor {
                     *anc = anchor;
@@ -340,20 +624,13 @@ fn flush(
                 if tf.translation != pos {
                     tf.translation = pos;
                 }
-                if *vis != Visibility::Visible {
-                    *vis = Visibility::Visible;
+                if *ls != spacing {
+                    *ls = spacing;
                 }
             }
             None => {
-                commands.spawn((
-                    Text2d::new(t.text.clone()),
-                    TextFont::from_font_size(t.size),
-                    TextColor(t.color),
-                    anchor,
-                    Transform::from_translation(pos),
-                    Visibility::Visible,
-                    PoolText,
-                ));
+                let font = make_font(handle, t.size, weight, style);
+                commands.spawn((Text2d::new(t.text.clone()), font, TextColor(color), anchor, Transform::from_translation(pos), spacing, PoolText));
             }
         }
     }
@@ -365,6 +642,11 @@ fn flush(
         }
     }
     for l in &paint.lines {
-        gizmos.line_2d(to_world(l.a), to_world(l.b), l.color);
+        match l {
+            LineCmd::Line(a, b, c) => gizmos.line_2d(to_world(*a), to_world(*b), faded(*c, k)),
+            LineCmd::Circle(c, r, color) => {
+                gizmos.circle_2d(Isometry2d::from_translation(to_world(*c)), *r, faded(*color, k)).resolution(((*r) as u32).clamp(24, 160));
+            }
+        }
     }
 }

@@ -1,93 +1,161 @@
-//! Play screen. The centrepiece is a big dot flashing on every click (brass on beat 1).
-//! Secondary, smaller and dimmer: a table metronome and the current pattern as a
-//! pick-direction (down/up stroke) diagram with a playhead. Before a pattern switch the
-//! next pattern is previewed below with a countdown bar. No accuracy feedback during play.
+//! Play screen ("Guitar Guru" style). The guru keeps time with a head bob phase-locked to
+//! the click (audio clock); the dominant click dot flashes sindoor on beat one, indigo on
+//! the others. Below: the current pattern as thin pick arrows (played strokes only) or a
+//! tab, with a violet P.M. bracket and an ochre playhead; the next pattern fades in below
+//! it during the last two bars before a switch, with a countdown line. No accuracy
+//! feedback during play.
 
-use bevy::color::Color;
+use bevy::color::{Alpha, Color};
 
 use crate::game::Game;
-use crate::paint::{Align, Paint, col};
-use crate::patterns::{BEATS_PER_BAR, PATTERNS, Pattern, bar_seconds, beat_seconds, sixteenth_seconds};
-use crate::ui_common::*;
+use crate::mascot::{self, MascotImages, Mood, STAGE_NAMES, STAGE_NODS};
+use crate::paint::{Align, Font, Paint, col};
+use crate::patterns::{BEATS_PER_BAR, INGREDIENTS, PATTERNS, Pattern, bar_seconds, beat_seconds, sixteenth_seconds};
+use crate::ui_common::dim;
 
-pub fn draw(g: &mut Game, p: &mut Paint) {
-    let (Some(engine), Some(play)) = (&g.engine, &g.play) else { return };
-    let t = play.now(engine);
-    let bpm = play.plan.bpm;
-    let beat_s = beat_seconds(bpm);
-    let bar_s = bar_seconds(bpm);
-    let s16 = sixteenth_seconds(bpm);
-    let total = play.plan.total_seconds();
-    let start = play.plan.scoring_start();
-    let waiting = play.waiting();
+pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
+    let mut end_now = false;
+    let mut abort = false;
+    {
+        let (Some(engine), Some(play)) = (&g.engine, &g.play) else { return };
+        let t = play.now(engine);
+        let bpm = play.plan.bpm;
+        let beat_s = beat_seconds(bpm);
+        let bar_s = bar_seconds(bpm);
+        let s16 = sixteenth_seconds(bpm);
+        let total = play.plan.total_seconds();
+        let start = play.plan.scoring_start();
+        let waiting = play.waiting();
+        let mask = play.level.mask();
 
-    // Time left: a solid bar anchored at the right edge; its left edge moves right.
-    let left = if waiting || t < start { 1.0 } else { (1.0 - (t - start) / (total - start)).clamp(0.0, 1.0) as f32 };
-    p.rect(0.0, 0.0, 1440.0, 10.0, col::PANEL);
-    p.rect(1440.0 * (1.0 - left), 0.0, 1440.0 * left, 10.0, col::BRASS);
-    let title = if play.calibration { "latency calibration".to_string() } else { format!("{}  {} BPM", play.level.name(), bpm) };
-    p.text(32.0, 40.0, title, 16.0, col::FAINT, Align::Left);
+        // Time left: 4 px ochre bar anchored at the right edge.
+        let left = if waiting || t < start { 1.0 } else { (1.0 - (t - start) / (total - start)).clamp(0.0, 1.0) as f32 };
+        p.rect(1440.0 * (1.0 - left), 0.0, 1440.0 * left, 4.0, col::OCHRE);
 
-    // ---------- the click dot (centrepiece)
-    let beats = t / beat_s;
-    let running = t >= 0.0 && (waiting || t < total);
-    let cur_beat = beats.floor() as i64;
-    let since = ((beats - beats.floor()) * beat_s) as f32;
-    let flash = if running { (-since / 0.12).exp() } else { 0.0 };
-    let accent = cur_beat.rem_euclid(BEATS_PER_BAR as i64) == 0;
-    let base = if accent { col::BRASS } else { col::TEXT };
-    let (dx, dy, dr) = (720.0, 210.0, 100.0);
-    p.disc(dx, dy, dr + 4.0, col::PANEL2);
-    p.disc(dx, dy, dr, col::BG);
-    if running {
-        let r = dr * (0.92 + 0.08 * flash);
-        p.disc(dx, dy, r, mix(col::BG, base, 0.12 + 0.88 * flash));
-    }
-    // Count-in status, subtle: whether it is waiting and how many clicks were caught.
-    if let Some(gate) = &play.gate {
-        p.text(720.0, 346.0, "play along to start", 14.0, col::FAINT, Align::Center);
-        for i in 0..crate::countin::NEEDED {
-            let c = if i < gate.streak() { col::DIM } else { col::PANEL2 };
-            p.disc(696.0 + i as f32 * 16.0, 368.0, 4.0, c);
+        // Header
+        p.serif(120.0, 50.0, format!("{bpm} BPM"), 44.0, col::TEXT, Align::Left);
+        let sub: Vec<String> = if play.calibration {
+            vec!["latency calibration".into()]
+        } else {
+            match play.level.kind {
+                crate::patterns::LevelKind::Run(m) => {
+                    let v: Vec<String> = INGREDIENTS.iter().filter(|i| m & i.bit != 0).map(|i| i.name.to_string()).collect();
+                    if v.is_empty() { vec!["basic".into()] } else { v }
+                }
+                crate::patterns::LevelKind::Drill(pi) => vec![format!("drill \u{b7} {}", PATTERNS[pi].name)],
+            }
+        };
+        p.label_at(284.0, 58.0, &sub.join(" \u{b7} "), Align::Left, col::DIM);
+        let bar_no = ((t - start) / bar_s).floor() as i64 + 1;
+        let bars = if t < start || waiting { "\u{2013}".to_string() } else { format!("{} / {}", bar_no.min(i64::from(play.plan.scored_bars)), play.plan.scored_bars) };
+        let rem = if waiting { (total - start) as u32 } else { (total - t.max(start)).max(0.0) as u32 };
+        p.label_at(944.0, 58.0, "bar", Align::Right, col::DIM);
+        p.serif(966.0, 54.0, bars, 26.0, col::TEXT, Align::Left);
+        p.label_at(1076.0, 58.0, "left", Align::Right, col::DIM);
+        p.serif(1097.0, 54.0, format!("{}:{:02}", rem / 60, rem % 60), 26.0, col::TEXT, Align::Left);
+        if p.round_button(1238.0, 52.0, 22.0, "x") {
+            abort = true;
         }
-    } else if t < start {
-        p.text(720.0, 346.0, "starting next bar", 14.0, col::FAINT, Align::Center);
-    }
+        if p.round_button(1298.0, 52.0, 22.0, "flag") {
+            end_now = true;
+        }
 
-    // ---------- small, dim metronome on the left
-    metronome(p, 190.0, 70.0, 0.6, if running { beats } else { 0.5 }, bpm);
+        // ---------- the guru keeps time (phase from the audio clock)
+        let beats = t / beat_s;
+        let running = t >= 0.0 && (waiting || t < total);
+        let stage = mascot::stage_for(bpm, mask.count_ones());
+        let near = beats.round() as i64;
+        let pose = mascot::pose(stage, running.then(|| beats - beats.floor()), near.rem_euclid(BEATS_PER_BAR as i64) == 0);
+        mascot::draw(p, imgs, 266.0, 168.0, 0.95, stage, Mood::Neutral, &pose);
+        p.label_at(946.0, 285.0, &format!("stage {stage} \u{b7} {}", STAGE_NAMES[stage as usize]), Align::Left, col::DIM);
+        p.italic(946.0, 313.0, "The guru's head lands on every", 19.0, col::DIM, Align::Left);
+        p.italic(946.0, 338.0, &format!("click, a little deeper on one ({}).", STAGE_NODS[stage as usize]), 19.0, col::DIM, Align::Left);
 
-    // ---------- current pattern (secondary)
-    let rel = t - start;
-    let in_count_in = waiting || rel < 0.0;
-    let bar_idx = if in_count_in { 0 } else { (rel / bar_s).floor() as i64 };
-    let bar_t0 = start + bar_idx as f64 * bar_s;
-    let pos16 = ((t - bar_t0) / s16) as f32;
-    let cur = play.plan.pattern_at(bar_idx);
-    p.text(80.0, 412.0, PATTERNS[cur].name, 15.0, col::DIM, Align::Left);
-    let (pm_on, tab) = (play.level.pm_on(), play.level.tab());
-    stroke_diagram(p, &PATTERNS[cur], 80.0, 430.0, 80.0, 64.0, if in_count_in { None } else { Some(pos16) }, true, pm_on, tab);
+        // ---------- the click dot (dominant), fine double ring
+        let (dx, dy, dr) = (720.0, 293.0, 163.0);
+        let cur_beat = beats.floor() as i64;
+        let since = ((beats - beats.floor()) * beat_s) as f32;
+        let flash = if running { (-since / 0.14).exp() } else { 0.0 };
+        let accent = cur_beat.rem_euclid(BEATS_PER_BAR as i64) == 0;
+        let hue = if accent { col::LATE } else { col::EARLY };
+        p.ring(dx, dy, dr + 22.0, col::LINE);
+        let paper = Color::srgb(0.98, 0.96, 0.925);
+        p.disc(dx, dy, dr, mix(paper, hue, flash));
+        p.ring(dx, dy, dr, col::TEXT);
+        p.ring(dx, dy, dr + 1.0, col::TEXT);
+        p.dotted_ring(dx, dy, dr - 11.0, 0.9, if flash > 0.3 { paper } else { col::OCHRE });
+        if let Some(gate) = &play.gate {
+            p.italic(dx, dy - 22.0, "Play along", 34.0, if flash > 0.5 { paper } else { col::TEXT }, Align::Center);
+            for i in 0..crate::countin::NEEDED {
+                let cx = dx - 36.0 + i as f32 * 24.0;
+                if i < gate.streak() {
+                    p.disc(cx, dy + 24.0, 7.0, col::OCHRE);
+                }
+                p.ring(cx, dy + 24.0, 7.0, if flash > 0.5 { paper } else { col::TEXT });
+            }
+        } else if t < start {
+            p.italic(dx, dy, "here we go", 28.0, if flash > 0.5 { paper } else { col::DIM }, Align::Center);
+        }
 
-    // ---------- next pattern preview with countdown to the switch
-    if !waiting {
-        let next_switch = (bar_idx.max(0) + 1..i64::from(play.plan.scored_bars)).find(|&b| play.plan.pattern_at(b) != cur);
-        if let Some(sb) = next_switch {
-            let t_switch = start + sb as f64 * bar_s;
-            let lead = 2.0 * bar_s;
-            let remain = t_switch - t;
-            if remain > 0.0 && remain <= lead {
-                let next = play.plan.pattern_at(sb);
-                let (x, w) = (400.0, 640.0);
-                p.text(x, 676.0, format!("next: {}", PATTERNS[next].name), 14.0, col::DIM, Align::Left);
-                let f = (remain / lead) as f32;
-                p.rect(x, 690.0, w, 6.0, col::PANEL);
-                p.rect(x + w * (1.0 - f), 690.0, w * f, 6.0, dim(col::BRASS, 0.8));
-                stroke_diagram(p, &PATTERNS[next], x, 704.0, 40.0, 40.0, None, false, pm_on, tab);
+        // ---------- current pattern
+        p.hline(120.0, 545.0, 1200.0, col::LINE);
+        let rel = t - start;
+        let in_count_in = waiting || rel < 0.0;
+        let bar_idx = if in_count_in { 0 } else { (rel / bar_s).floor() as i64 };
+        let bar_t0 = start + bar_idx as f64 * bar_s;
+        let pos16 = ((t - bar_t0) / s16) as f32;
+        let cur = play.plan.pattern_at(bar_idx);
+        let (pm_on, tab) = (play.level.pm_on(), play.level.tab());
+        p.label_at(120.0, 583.0, &section_letter(&play.plan.bar_patterns, cur), Align::Left, col::DIM);
+        p.serif(141.0, 576.0, PATTERNS[cur].name, 30.0, col::TEXT, Align::Left);
+        let playhead = if in_count_in { None } else { Some(pos16) };
+        let bottom = stroke_diagram(p, &PATTERNS[cur], 141.0, 600.0, 53.0, 36.0, playhead, pm_on, tab, 1.0);
+
+        // ---------- next pattern: fades in below during the last two bars
+        if !waiting {
+            let next_switch = (bar_idx.max(0) + 1..i64::from(play.plan.scored_bars)).find(|&b| play.plan.pattern_at(b) != cur);
+            if let Some(sb) = next_switch {
+                let remain = start + sb as f64 * bar_s - t;
+                let lead = 2.0 * bar_s;
+                if remain > 0.0 && remain <= lead {
+                    let next = play.plan.pattern_at(sb);
+                    let f = (remain / lead) as f32;
+                    let alpha = ((1.0 - f) * 4.0).clamp(0.0, 1.0);
+                    let y = bottom + 18.0;
+                    let a = |c: Color| c.with_alpha(alpha);
+                    p.label_at(141.0, y, &format!("next \u{b7} {} bars", (remain / bar_s).ceil()), Align::Left, a(col::DIM));
+                    p.serif(141.0, y + 26.0, PATTERNS[next].name, 22.0, a(col::TEXT), Align::Left);
+                    let (lx, lw) = (141.0, 400.0);
+                    p.rect(lx, y + 44.0, lw, 1.0, a(col::LINE));
+                    p.rect(lx + lw * (1.0 - f), y + 43.5, lw * f, 2.0, a(col::OCHRE));
+                    // Small arrows of the next pattern (played strokes only).
+                    let hits = PATTERNS[next].hits();
+                    for n in &hits {
+                        let x = 600.0 + n.pos as f32 * 26.0;
+                        p.stroke_arrow(x, y + 26.0, 16.0, n.downstroke(), a(col::DIM));
+                    }
+                }
             }
         }
+        p.text(1320.0, 880.0, "Enter: end & score \u{b7} Esc: abort", 12.0, col::FAINT, Align::Right);
     }
+    if abort {
+        g.abort_play();
+    } else if end_now {
+        g.end_early();
+    }
+}
 
-    p.text(720.0, 870.0, "Enter: end & score     Esc: abort", 13.0, col::FAINT, Align::Center);
+/// Section letter (A, B, ...) of a pattern by its first appearance in the run.
+fn section_letter(bars: &[usize], pat: usize) -> String {
+    let mut seen: Vec<usize> = Vec::new();
+    for &b in bars {
+        if !seen.contains(&b) {
+            seen.push(b);
+        }
+    }
+    let i = seen.iter().position(|&x| x == pat).unwrap_or(0);
+    ((b'A' + (i as u8 % 26)) as char).to_string()
 }
 
 fn mix(a: Color, b: Color, k: f32) -> Color {
@@ -95,30 +163,14 @@ fn mix(a: Color, b: Color, k: f32) -> Color {
     Color::srgb(a.red + (b.red - a.red) * k, a.green + (b.green - a.green) * k, a.blue + (b.blue - a.blue) * k)
 }
 
-/// One bar on the 16th grid: count labels, then either stroke arrows (played down, played
-/// up) with duration bars, or with `tab` a six-string tab with
-/// fret numbers and small pick arrows above. P.M. brackets mark palm-muted notes when
-/// `pm_on`. Optional playhead position in sixteenths. Drawn at reduced contrast.
+/// One bar on the 16th grid: thin pick arrows for the played strokes (current in ochre),
+/// a violet P.M. bracket over palm-muted notes, serif "1 e + a" labels below; with `tab`
+/// six hairline strings with serif fret numbers. Returns the bottom y.
 #[allow(clippy::too_many_arguments)]
-fn stroke_diagram(p: &mut Paint, pat: &Pattern, x0: f32, top: f32, cell: f32, arrow: f32, playhead: Option<f32>, labels: bool, pm_on: bool, tab: bool) {
-    let h = if tab { arrow * 2.6 } else { arrow + 34.0 };
-    if labels {
-        for k in 0..16 {
-            let x = x0 + k as f32 * cell;
-            let (lbl, size, c) = match k % 4 {
-                0 => (format!("{}", k / 4 + 1), 18.0, col::DIM),
-                1 => ("e".into(), 14.0, col::FAINT),
-                2 => ("+".into(), 15.0, col::FAINT),
-                _ => ("a".into(), 14.0, col::FAINT),
-            };
-            p.text(x + cell / 2.0, top, lbl, size, c, Align::Center);
-        }
-    }
-    let ltop = top + if labels { 20.0 } else { 0.0 };
-    // P.M. brackets above the notes.
+pub fn stroke_diagram(p: &mut Paint, pat: &Pattern, x0: f32, top: f32, cell: f32, arrow: f32, playhead: Option<f32>, pm_on: bool, tab: bool, alpha: f32) -> f32 {
+    let a = |c: Color| c.with_alpha(alpha);
     let hits = pat.hits();
-    let pm_y = ltop + 6.0;
-    let gtop = ltop + 16.0;
+    // P.M. brackets
     if pm_on {
         let mut i = 0;
         while i < hits.len() {
@@ -126,111 +178,73 @@ fn stroke_diagram(p: &mut Paint, pat: &Pattern, x0: f32, top: f32, cell: f32, ar
                 i += 1;
                 continue;
             }
-            let start = hits[i].pos;
             let mut j = i;
             while j + 1 < hits.len() && hits[j + 1].pm {
                 j += 1;
             }
-            let end = hits[j].pos + hits[j].len;
-            let (xa, xb) = (x0 + start as f32 * cell + 2.0, x0 + end as f32 * cell - 4.0);
-            let tsize = (cell * 0.18).clamp(9.0, 12.0);
-            p.text(xa, pm_y, "P.M.", tsize, col::DIM, Align::Left);
-            let mut x = xa + tsize * 2.6;
-            while x < xb {
-                p.rect(x, pm_y, 4.0_f32.min(xb - x), 1.0, col::DIM);
-                x += 8.0;
-            }
-            p.rect(xb, pm_y, 1.0, 6.0, col::DIM);
+            let (xa, xb) = (x0 + hits[i].pos as f32 * cell + 2.0, x0 + (hits[j].pos + hits[j].len) as f32 * cell - 8.0);
+            p.styled(xa, top - 2.0, "P.M.", 10.0, a(col::TONE), Align::Left, Font::SerifItalic, 0.0);
+            p.rect(xa, top + 6.0, xb - xa, 1.0, a(col::TONE));
+            p.rect(xb, top + 6.0, 1.0, 6.0, a(col::TONE));
             i = j + 1;
         }
     }
-    for k in 0..=16 {
-        p.rect(x0 + k as f32 * cell, gtop, 1.0, h, if k % 4 == 0 { col::LINE } else { col::PANEL });
-    }
+    let arrow_y = top + 16.0 + arrow / 2.0;
+    let active = |pos: f64, len: f64| playhead.is_some_and(|ph| ph >= pos as f32 && ph < (pos + len) as f32);
+    let mut bottom;
     if tab {
-        // Six strings, high e on top; small pick arrows above.
-        let sp = (h - arrow * 0.5 - 8.0) / 6.0;
-        let s_top = gtop + arrow * 0.5 + 6.0;
-        let string_y = |s: u8| s_top + (f32::from(s) - 0.5) * sp;
+        let names = ["e", "B", "G", "D", "A", "E"];
+        let sp = 20.0;
+        let s_top = arrow_y + arrow / 2.0 + 16.0;
+        let string_y = |s: u8| s_top + f32::from(s - 1) * sp;
         for s in 1..=6u8 {
-            p.rect(x0, string_y(s), 16.0 * cell, 1.0, col::LINE);
+            p.styled(x0 - 13.0, string_y(s), names[s as usize - 1], 12.0, a(col::FAINT), Align::Center, Font::SerifItalic, 0.0);
+            p.rect(x0, string_y(s), 16.0 * cell, 1.0, a(col::DIM));
         }
         let fr = pat.frettings();
         for (n, f) in hits.iter().zip(&fr) {
             let cx = x0 + n.pos as f32 * cell + cell / 2.0;
-            let active = playhead.is_some_and(|ph| ph >= n.pos as f32 && ph < (n.pos + n.len) as f32);
-            let c = if active { dim(col::BRASS, 0.85) } else { dim(col::TEXT, 0.65) };
-            p.stroke_arrow(cx, gtop + arrow * 0.25, arrow * 0.4, n.downstroke(), c);
-            let size = (sp * 1.1).clamp(9.0, 16.0);
+            let c = if active(n.pos, n.len) { col::OCHRE } else { col::TEXT };
+            p.stroke_arrow(cx, arrow_y, arrow * 0.7, n.downstroke(), a(c));
             let mut put = |s: u8, fret: u8| {
                 let y = string_y(s);
-                p.rect(cx - size * 0.45, y - size * 0.5, size * 0.9 * if fret >= 10 { 1.6 } else { 1.0 }, size, col::BG);
-                p.text(cx, y, format!("{fret}"), size, c, Align::Center);
+                let w = if fret >= 10 { 22.0 } else { 14.0 };
+                p.rect(cx - w / 2.0, y - 9.0, w, 18.0, a(col::BG));
+                p.serif(cx, y - 2.0, format!("{fret}"), 20.0, a(c), Align::Center);
             };
             put(f.string, f.fret);
             if f.power {
                 put(f.string - 1, f.fret + 2);
             }
         }
+        bottom = string_y(6) + 14.0;
     } else {
-        // Played notes only: arrow at the onset (alternate-picking direction) plus a
-        // duration bar. Ghost strokes stay in the data but are not drawn.
-        for st in pat.strokes() {
-            let x = x0 + st.pos as f32 * cell;
-            let cx = x + cell / 2.0;
-            if !st.played {
-                continue; // ghost strokes (unplayed hand motion) are not drawn
-            }
-            let len = hits.iter().find(|h| (h.pos - st.pos).abs() < 1e-6).map_or(1.0, |h| h.len) as f32;
-            let active = playhead.is_some_and(|ph| ph >= st.pos as f32 && ph < st.pos as f32 + len);
-            let base = if st.down { col::TEXT } else { col::DIM };
-            let c = if active { dim(col::BRASS, 0.8) } else { dim(base, 0.6) };
-            p.stroke_arrow(cx, gtop + 8.0 + arrow / 2.0, arrow, st.down, c);
-            p.rect(x + 4.0, gtop + arrow + 18.0, len * cell - 8.0, 3.0, if active { dim(col::BRASS, 0.8) } else { col::LINE });
+        for n in &hits {
+            let cx = x0 + n.pos as f32 * cell + cell / 2.0;
+            let c = if active(n.pos, n.len) { col::OCHRE } else { col::TEXT };
+            p.stroke_arrow(cx, arrow_y, arrow, n.downstroke(), a(c));
         }
+        bottom = arrow_y + arrow / 2.0 + 12.0;
     }
+    // Count labels
+    let ly = bottom + 10.0;
+    let cur16 = playhead.map(|ph| ph.floor() as i32);
+    for k in 0..16 {
+        let x = x0 + k as f32 * cell + cell / 2.0;
+        let lbl = match k % 4 {
+            0 => format!("{}", k / 4 + 1),
+            1 => "e".into(),
+            2 => "+".into(),
+            _ => "a".into(),
+        };
+        let c = if cur16 == Some(k) { col::OCHRE } else if k % 4 == 0 { col::TEXT } else { col::FAINT };
+        p.serif(x, ly, lbl, if k % 4 == 0 { 17.0 } else { 14.0 }, a(c), Align::Center);
+    }
+    bottom = ly + 12.0;
     if let Some(ph) = playhead {
         let px = x0 + ph.clamp(0.0, 16.0) * cell;
-        p.rect(px - 1.0, gtop, 2.0, h, dim(col::BRASS, 0.7));
+        p.rect(px - 0.75, top + 8.0, 1.5, bottom - top - 12.0, a(col::OCHRE));
     }
-}
-
-/// Classical table metronome: pyramid wooden body, inverted pendulum arm with a sliding
-/// weight (lower = faster). The arm passes the centre on each click (one end-to-end swing
-/// per beat), so the extremes fall on the off-beat eighths. Drawn small and dim.
-fn metronome(p: &mut Paint, cx: f32, top: f32, s: f32, beats: f64, bpm: u32) {
-    let k = 0.55; // dimming toward the panel colour
-    let wood = dim(Color::srgb(0.43, 0.26, 0.15), k);
-    let wood_dark = dim(Color::srgb(0.29, 0.17, 0.09), k);
-    let face = dim(Color::srgb(0.55, 0.36, 0.21), k);
-    let metal = dim(Color::srgb(0.80, 0.78, 0.72), k);
-    let (top_y, bot_y) = (top, top + 260.0 * s);
-    let (top_w, bot_w) = (64.0 * s, 230.0 * s);
-    let mut y = top_y;
-    while y < bot_y {
-        let f = (y - top_y) / (bot_y - top_y);
-        let w = top_w + (bot_w - top_w) * f;
-        p.rect(cx - w / 2.0, y, w, 2.0, wood);
-        let fw = (w - 34.0 * s).max(0.0);
-        if y > top_y + 16.0 * s && y < bot_y - 34.0 * s {
-            p.rect(cx - fw / 2.0, y, fw, 2.0, face);
-        }
-        y += 2.0;
-    }
-    p.rect(cx - bot_w / 2.0 - 12.0 * s, bot_y, bot_w + 24.0 * s, 16.0 * s, wood_dark);
-    p.rect(cx - top_w / 2.0 - 4.0 * s, top_y - 8.0 * s, top_w + 8.0 * s, 10.0 * s, wood_dark);
-    for i in 0..9 {
-        let yy = top_y + (40.0 + i as f32 * 22.0) * s;
-        p.rect(cx - 7.0 * s, yy, 14.0 * s, 1.5, wood_dark);
-    }
-    let (px, py, len) = (cx, bot_y - 46.0 * s, 250.0 * s);
-    let theta = 0.36 * (std::f64::consts::PI * beats).sin() as f32;
-    let dir = bevy::math::Vec2::new(theta.sin(), -theta.cos());
-    let mid = bevy::math::Vec2::new(px, py) + dir * (len / 2.0);
-    p.rot_rect(mid.x, mid.y, 6.0 * s, len, -theta, metal);
-    let d = len * (0.32 + 0.55 * (180.0 - bpm as f32).max(0.0) / 140.0);
-    let w = bevy::math::Vec2::new(px, py) + dir * d;
-    p.rot_rect(w.x, w.y, 36.0 * s, 24.0 * s, -theta, wood_dark);
-    p.rot_rect(w.x, w.y, 30.0 * s, 18.0 * s, -theta, metal);
-    p.disc(px, py, 7.0 * s, wood_dark);
+    let _ = dim;
+    bottom
 }
