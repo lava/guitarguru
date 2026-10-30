@@ -185,6 +185,9 @@ impl Game {
     pub fn set_preset(&mut self, preset: crate::monitor::SoundPreset) {
         self.cfg.tone.preset = preset;
         self.rebuild_chain();
+        if let Some(e) = &self.engine {
+            e.shared.monitor_on.store(self.cfg.audio.monitor && preset.monitors(), Ordering::Relaxed);
+        }
     }
 
     pub fn chain_description(&self) -> String {
@@ -526,7 +529,7 @@ pub fn game_system(
             if keys.just_pressed(KeyCode::Escape) {
                 g.screen = Screen::Menu;
             }
-            crate::ui_settings::draw(g, &mut paint);
+            crate::ui_settings::draw(g, &mut paint, mascot);
         }
         Screen::Play => {
             if keys.just_pressed(KeyCode::Escape) {

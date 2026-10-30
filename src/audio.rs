@@ -422,7 +422,7 @@ impl AudioEngine {
     pub fn start(settings: &AudioSettings, tone: &ToneSettings) -> Result<Self, String> {
         let shared = Arc::new(Shared::default());
         shared.click_gain.store(10f32.powf(settings.click_volume_db / 20.0));
-        shared.monitor_on.store(settings.monitor, Ordering::Relaxed);
+        shared.monitor_on.store(settings.monitor && tone.preset.monitors(), Ordering::Relaxed);
         *shared.chain.lock().unwrap() = Some(Box::new(Chain::build(tone, SAMPLE_RATE)));
         let recording = Arc::new(Mutex::new(Recording::default()));
         let (stop_tx, stop_rx) = mpsc::channel::<()>();
@@ -730,6 +730,7 @@ impl InState {
             sh.dsp_load.store(old + 0.05 * (load - old));
         } else {
             x.iter_mut().for_each(|v| *v = 0.0);
+            sh.dsp_load.store(0.0);
         }
         let m = n.min(self.mon.slots());
         if let Ok(chunk) = self.mon.write_chunk_uninit(m) {

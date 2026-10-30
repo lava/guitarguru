@@ -4,9 +4,13 @@
 
 use std::sync::atomic::Ordering;
 
+use bevy::color::{Alpha, Color};
+use bevy::math::Vec2;
+
 use crate::game::{Game, Screen, calibration_level};
+use crate::mascot::MascotImages;
 use crate::monitor::{AmpChoice, SoundPreset};
-use crate::paint::{Align, Paint, col, fit};
+use crate::paint::{Align, Font, Paint, col, fit};
 use crate::ui_menu::{header, link};
 
 const LX: f32 = 170.0;
@@ -49,6 +53,32 @@ fn radio_list(p: &mut Paint, scroll: &mut usize, x: f32, y: f32, rows: &[(String
     hit
 }
 
+/// The guitar sound: hand-drawn guitars (and an amp for mute) in a row from `x0`, tops
+/// at `y`, a one-word label under each. The chosen one is in full colour with a
+/// gold diamond under its label; returns a new choice.
+fn sound_choice(p: &mut Paint, imgs: &MascotImages, x0: f32, y: f32, cur: SoundPreset) -> Option<SoundPreset> {
+    let (step, w, h) = (88.0, 26.0, 65.0);
+    let mut pick = None;
+    for (k, s) in SoundPreset::ALL.into_iter().enumerate() {
+        let x = x0 + step / 2.0 + k as f32 * step;
+        let on = s == cur;
+        let hov = p.hover(x - step / 2.0 + 4.0, y - 4.0, step - 8.0, h + 30.0);
+        let alpha = if on { 1.0 } else if hov { 0.85 } else { 0.5 };
+        if let Some(img) = imgs.sounds.get(k) {
+            p.image(img, Vec2::new(x, y + h / 2.0), Vec2::new(w, h), Vec2::ZERO, 0.0, Color::WHITE.with_alpha(alpha));
+        }
+        let c = if on { col::TEXT } else if hov { col::OCHRE } else { col::DIM };
+        p.styled(x, y + h + 14.0, s.name(), 13.0, c, Align::Center, if on { Font::SansMedium } else { Font::Sans }, 0.0);
+        if on {
+            p.rot_rect(x, y + h + 30.0, 4.5, 4.5, std::f32::consts::FRAC_PI_4, col::GOLD);
+        }
+        if hov && p.clicked && !on {
+            pick = Some(s);
+        }
+    }
+    pick
+}
+
 fn radio_inline(p: &mut Paint, x: f32, y: f32, label: &str, on: bool, size: f32) -> bool {
     if on {
         p.disc(x + 8.0, y, 6.0, col::OCHRE);
@@ -59,7 +89,7 @@ fn radio_inline(p: &mut Paint, x: f32, y: f32, label: &str, on: bool, size: f32)
     p.hit(x, y - 14.0, 26.0 + label.len() as f32 * size * 0.5, 28.0)
 }
 
-pub fn draw(g: &mut Game, p: &mut Paint) {
+pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
     header(p, "Setup", false);
     if link(p, 1270.0, 66.0, "Main menu") {
         g.screen = Screen::Menu;
@@ -167,16 +197,10 @@ pub fn draw(g: &mut Game, p: &mut Paint) {
 
     // ---------- sound: three presets; the heavy one uses the amp and cab chosen here
     p.serif(RX, 139.0, "Sound", 28.0, col::TEXT, Align::Left);
-    for (k, preset) in SoundPreset::ALL.into_iter().enumerate() {
-        let sel = g.cfg.tone.preset == preset;
-        let x = RX + k as f32 * 174.0;
-        if radio_inline(p, x, 182.0, preset.name(), sel, 15.0) && !sel {
-            g.cfg.tone.preset = preset;
-            rebuild = true;
-        }
-        p.text(x + 22.0, 202.0, preset.about(), 11.0, col::FAINT, Align::Left);
+    if let Some(preset) = sound_choice(p, imgs, RX - 22.0, 164.0, g.cfg.tone.preset) {
+        g.set_preset(preset);
     }
-    let top = 226.0;
+    let top = 290.0;
     if g.cfg.tone.preset == SoundPreset::Heavy {
         let mut amps = vec![("Clean DI".to_string(), "no amp".to_string(), AmpChoice::Clean), ("Built-in drive".to_string(), "fallback".to_string(), AmpChoice::Drive)];
         for n in &g.lists.nams {
@@ -195,13 +219,13 @@ pub fn draw(g: &mut Game, p: &mut Paint) {
             crows.push((label, "Jester IR".into(), g.cfg.tone.cab.as_deref() == Some(ir.as_str())));
         }
         let mut csc = g.lists.cab_scroll;
-        if let Some(k) = radio_list(p, &mut csc, RX, top + 4.0 * ROW + 26.0, &crows, 4) {
+        if let Some(k) = radio_list(p, &mut csc, RX, top + 4.0 * ROW + 26.0, &crows, 3) {
             g.cfg.tone.cab = if k == 0 { None } else { Some(irs[k - 1].clone()) };
             rebuild = true;
         }
         g.lists.cab_scroll = csc;
     }
-    let ty = top + 8.0 * ROW + 54.0 - 6.0;
+    let ty = top + 7.0 * ROW + 48.0;
     let d = stepper(p, RX, ty, "gate", &format!("{:.0}", g.cfg.tone.gate_db));
     if d != 0 {
         g.cfg.tone.gate_db = (g.cfg.tone.gate_db + 5.0 * d as f32).clamp(-90.0, -20.0);
@@ -216,7 +240,7 @@ pub fn draw(g: &mut Game, p: &mut Paint) {
     if radio_inline(p, RX, my2, "Hear the amp while playing (monitoring)", g.cfg.audio.monitor, 15.0) {
         g.cfg.audio.monitor = !g.cfg.audio.monitor;
         if let Some(e) = &g.engine {
-            e.shared.monitor_on.store(g.cfg.audio.monitor, Ordering::Relaxed);
+            e.shared.monitor_on.store(g.cfg.audio.monitor && g.cfg.tone.preset.monitors(), Ordering::Relaxed);
         }
         g.cfg.save();
     }

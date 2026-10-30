@@ -1,8 +1,9 @@
 //! Monitoring DSP ("amp sound"): input gain -> noise gate -> amp (NAM or fallback drive)
 //! -> cab IR (uniformly partitioned FFT convolution) -> room -> output level.
-//! Three sound presets: heavy (the amp and cab chosen in Setup), a classic rock crunch
+//! Sound presets: heavy (the amp and cab chosen in Setup), a classic rock crunch
 //! (the Soldano capture driven much softer) and a clean studio sound (no amp model:
-//! compression, a touch of saturation, a warm cab and a small room). The presets'
+//! compression, a touch of saturation, a warm cab and a small room), plus mute for players
+//! with their own amp on a splitter (no monitoring, nothing loaded). The presets'
 //! output trims match their loudness (see the `preset_loudness` test).
 //! Everything allocates on construction only; `process` is allocation-free.
 
@@ -35,23 +36,23 @@ pub enum SoundPreset {
     Crunch,
     /// Clean studio sound.
     Clean,
+    /// No monitoring at all (the player hears their own amp); the DI is still recorded.
+    Mute,
 }
 
 impl SoundPreset {
-    pub const ALL: [SoundPreset; 3] = [SoundPreset::Heavy, SoundPreset::Crunch, SoundPreset::Clean];
+    pub const ALL: [SoundPreset; 4] = [SoundPreset::Heavy, SoundPreset::Crunch, SoundPreset::Clean, SoundPreset::Mute];
     pub fn name(self) -> &'static str {
         match self {
             SoundPreset::Heavy => "Heavy",
             SoundPreset::Crunch => "Crunch",
             SoundPreset::Clean => "Clean",
+            SoundPreset::Mute => "Mute",
         }
     }
-    pub fn about(self) -> &'static str {
-        match self {
-            SoundPreset::Heavy => "high gain",
-            SoundPreset::Crunch => "classic rock'n'roll",
-            SoundPreset::Clean => "clean studio",
-        }
+    /// Does this preset play the guitar through the monitoring chain?
+    pub fn monitors(self) -> bool {
+        self != SoundPreset::Mute
     }
 }
 
@@ -450,6 +451,17 @@ impl Chain {
     pub fn build(s: &ToneSettings, sr: u32) -> Self {
         match s.preset {
             SoundPreset::Heavy => Self::build_heavy(s, sr),
+            // Never processed (monitoring is off); nothing is loaded.
+            SoundPreset::Mute => Self {
+                in_gain: 1.0,
+                drive: 1.0,
+                out_gain: 0.0,
+                gate: Gate::new(s.gate_db, sr as f32),
+                amp: Amp::Clean,
+                cab: None,
+                room: None,
+                description: "muted: no monitoring (your own amp)".into(),
+            },
             SoundPreset::Crunch => {
                 let t = ToneSettings {
                     amp: AmpChoice::Nam(CRUNCH_NAM.into()),
@@ -623,6 +635,9 @@ mod tests {
         assert!(x.iter().all(|v| v.is_finite() && v.abs() <= 1.0));
         assert!(x.iter().any(|v| v.abs() > 0.05), "makes sound");
         assert!(c.description.contains("small room"), "{}", c.description);
+        // Mute loads nothing and is never monitored.
+        let m = Chain::build(&ToneSettings { preset: SoundPreset::Mute, ..s }, 48000);
+        assert!(matches!(m.amp, Amp::Clean) && m.cab.is_none() && !SoundPreset::Mute.monitors());
     }
 
     /// Integrated loudness (BS.1770 K-weighting at 48 kHz, 400 ms blocks, absolute and
@@ -689,7 +704,7 @@ mod tests {
         println!("DI: {:.0} s, 100 ms peaks p90 {:.1} dBFS, loudness {:.1} LUFS", di.len() as f64 / 48000.0, 20.0 * p90.log10(), loudness(&di));
         let base = ToneSettings::default();
         let heavy = loudness(&render(&base, &di));
-        for preset in SoundPreset::ALL {
+        for preset in SoundPreset::ALL.into_iter().filter(|p| p.monitors()) {
             let s = ToneSettings { preset, ..base.clone() };
             let y = render(&s, &di);
             let peak = y.iter().fold(0.0f32, |m, v| m.max(v.abs()));

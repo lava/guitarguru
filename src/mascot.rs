@@ -41,6 +41,8 @@ impl Mood {
 #[derive(Resource)]
 pub struct MascotImages {
     layers: HashMap<(u32, Mood, &'static str), Handle<Image>>,
+    /// The sound choices' icons, in `SoundPreset::ALL` order.
+    pub sounds: Vec<Handle<Image>>,
 }
 
 pub fn load(mut commands: Commands, assets: Res<AssetServer>) {
@@ -52,7 +54,8 @@ pub fn load(mut commands: Commands, assets: Res<AssetServer>) {
             }
         }
     }
-    commands.insert_resource(MascotImages { layers });
+    let sounds = crate::monitor::SoundPreset::ALL.iter().map(|s| assets.load(format!("guitars/{}.png", s.name().to_lowercase()))).collect();
+    commands.insert_resource(MascotImages { layers, sounds });
 }
 
 /// Head and arm motion.
