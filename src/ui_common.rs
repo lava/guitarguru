@@ -89,20 +89,6 @@ pub fn stepper(p: &mut Paint, x: f32, y: f32, label: &str, value: &str) -> i32 {
     d
 }
 
-pub fn sparkline(p: &mut Paint, x: f32, y: f32, w: f32, h: f32, vals: &[f64], color: Color) {
-    if vals.len() < 2 {
-        return;
-    }
-    let (lo, hi) = vals.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), v| (a.min(*v), b.max(*v)));
-    let span = (hi - lo).max(1e-6);
-    let pt = |i: usize, v: f64| (x + w * i as f32 / (vals.len() - 1) as f32, y + h - h * ((v - lo) / span) as f32);
-    for i in 1..vals.len() {
-        let (x0, y0) = pt(i - 1, vals[i - 1]);
-        let (x1, y1) = pt(i, vals[i]);
-        p.line(x0, y0, x1, y1, color);
-    }
-}
-
 pub fn bar_label(n: &BarNote) -> &'static str {
     let k = n.pos.round() as usize % 4;
     ["1", "e", "+", "a"][k]

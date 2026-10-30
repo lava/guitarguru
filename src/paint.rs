@@ -106,23 +106,6 @@ impl Paint {
         self.rect(x, y, t, h, color);
         self.rect(x + w - t, y, t, h, color);
     }
-    pub fn dashed_frame(&mut self, x: f32, y: f32, w: f32, h: f32, color: Color) {
-        let dash: f32 = 6.0;
-        let mut i = 0.0;
-        while i < w {
-            let l = dash.min(w - i);
-            self.rect(x + i, y, l, 1.0, color);
-            self.rect(x + i, y + h - 1.0, l, 1.0, color);
-            i += 2.0 * dash;
-        }
-        let mut i = 0.0;
-        while i < h {
-            let l = dash.min(h - i);
-            self.rect(x, y + i, 1.0, l, color);
-            self.rect(x + w - 1.0, y + i, 1.0, l, color);
-            i += 2.0 * dash;
-        }
-    }
     pub fn disc(&mut self, cx: f32, cy: f32, r: f32, color: Color) {
         self.shapes.push(ShapeCmd { shape: Shape::Disc, center: Vec2::new(cx, cy), size: Vec2::splat(2.0 * r), color, rot: 0.0 });
     }

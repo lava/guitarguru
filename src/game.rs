@@ -10,7 +10,7 @@ use crate::config::Config;
 use crate::detect::Onset;
 use crate::monitor::Chain;
 use crate::paint::Paint;
-use crate::patterns::{BEATS_PER_BAR, PATTERNS, Pattern, SessionPlan, beat_seconds, pattern_by_id};
+use crate::patterns::{BEATS_PER_BAR, Pattern, SessionPlan, beat_seconds, pattern_by_id};
 use crate::progress::{HistoryEntry, Progress, level_key};
 use crate::score::ScoreReport;
 use crate::session::{RunData, Window};
@@ -321,10 +321,6 @@ impl Game {
         if let Some(r) = &mut self.results {
             r.listening = None;
         }
-    }
-
-    pub fn selected_pattern(&self) -> &'static Pattern {
-        &PATTERNS[self.selected.0.min(PATTERNS.len() - 1)]
     }
 
     pub fn retry(&mut self) {

@@ -121,7 +121,7 @@ pub fn draw(g: &mut Game, p: &mut Paint) {
         action = Action::Retry;
     }
     if let Some((pi, bpm)) = next_level(g, r) {
-        let label = format!("Next: {} {}", truncate(PATTERNS[pi].name, 12), bpm);
+        let label = format!("Next: {} {}", truncate(PATTERNS[pi].name, 11), bpm);
         if p.button(1194.0, 78.0, 226.0, 44.0, &label, false) {
             action = Action::Start(pi, bpm);
         }

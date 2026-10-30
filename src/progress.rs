@@ -56,9 +56,6 @@ impl Progress {
     pub fn best_entry(&self, key: &str) -> Option<&HistoryEntry> {
         self.history_for(key).into_iter().max_by(|a, b| a.combined.total_cmp(&b.combined))
     }
-    pub fn practice_seconds(&self) -> f64 {
-        self.history.iter().map(|h| h.seconds).sum()
-    }
 }
 
 impl Progress {
