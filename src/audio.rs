@@ -68,7 +68,12 @@ pub fn list_devices(input: bool) -> Vec<DeviceEntry> {
     let host = cpal::default_host();
     let devs = if input { host.input_devices() } else { host.output_devices() };
     devs.map(|ds| {
-        ds.filter_map(|d| Some(DeviceEntry { id: device_id(&d)?, label: format!("{} [{}]", device_label(&d), device_id(&d)?) }))
+        ds.filter_map(|d| {
+            let id = device_id(&d)?;
+            let name = d.description().map(|x| x.name().to_owned()).unwrap_or_default();
+            let short = name.replace("BANDFUSE USB Guitar Adapter", "BANDFUSE");
+            Some(DeviceEntry { label: format!("{short}  [{id}]"), id })
+        })
             .collect()
     })
     .unwrap_or_default()

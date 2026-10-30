@@ -78,10 +78,10 @@ pub fn draw(g: &mut Game, p: &mut Paint) {
         );
     }
     if let Some(w) = g.engine.as_ref().and_then(|e| e.info.warning.clone()) {
-        p.text(x + 16.0, y + 214.0, truncate(&w, 60), 12.0, col::LATE, Align::Left);
+        p.text(x + 16.0, y + 214.0, truncate(&w, 54), 12.0, col::LATE, Align::Left);
     }
     if let Some(e) = &g.engine_err {
-        p.text(x + 16.0, y + 196.0, truncate(e, 60), 12.0, col::MISS, Align::Left);
+        p.text(x + 16.0, y + 196.0, truncate(e, 54), 12.0, col::MISS, Align::Left);
     }
 
     // --- Tone column
@@ -91,7 +91,7 @@ pub fn draw(g: &mut Game, p: &mut Paint) {
     let mut rebuild = false;
     let mut amps = vec![("Clean DI".to_string(), AmpChoice::Clean), ("Built-in drive".to_string(), AmpChoice::Drive)];
     for n in &g.lists.nams {
-        amps.push((n.trim_end_matches(".nam").replace("Lum-", "NAM "), AmpChoice::Nam(n.clone())));
+        amps.push((n.trim_end_matches(".nam").trim_start_matches("Lum-").replace('-', " "), AmpChoice::Nam(n.clone())));
     }
     let mut y = 120.0;
     for (i, (label, choice)) in amps.iter().enumerate() {
@@ -107,7 +107,7 @@ pub fn draw(g: &mut Game, p: &mut Paint) {
     if amps.len() % 2 == 1 {
         y += 46.0;
     }
-    p.text(x + 16.0, y + 8.0, truncate(&g.chain_description(), 60), 12.0, col::DIM, Align::Left);
+    p.text(x + 16.0, y + 8.0, truncate(&g.chain_description(), 54), 12.0, col::DIM, Align::Left);
     y += 26.0;
     p.label(x + 16.0, y, "cab ir");
     y += 14.0;

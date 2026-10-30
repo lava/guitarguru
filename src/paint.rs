@@ -162,6 +162,7 @@ impl Paint {
         let hov = self.hover(x, y, w, h);
         self.rect(x, y, w, h, if selected { col::PANEL2 } else if hov { col::PANEL } else { col::BG });
         self.frame(x, y, w, h, 1.0, if selected { col::BRASS } else { col::LINE });
+        let label = fit(label, w - 16.0, 16.0);
         self.text(x + 10.0, y + h / 2.0, label, 16.0, if selected { col::TEXT } else { col::DIM }, Align::Left);
         self.hit(x, y, w, h)
     }
@@ -169,6 +170,13 @@ impl Paint {
         self.rect(x, y, w, h, col::PANEL);
         self.frame(x, y, w, h, 1.0, col::LINE);
     }
+}
+
+/// Truncate `s` to fit `w` design pixels at font `size` (the default font is monospaced,
+/// ~0.6 em per glyph).
+pub fn fit(s: &str, w: f32, size: f32) -> String {
+    let n = (w / (size * 0.61)).floor().max(2.0) as usize;
+    if s.chars().count() <= n { s.to_string() } else { s.chars().take(n - 1).collect::<String>() + "~" }
 }
 
 fn to_world(p: Vec2) -> Vec2 {
@@ -216,6 +224,9 @@ fn shape_image(size: u32, f: impl Fn(f32, f32) -> f32) -> Image {
 fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     commands.spawn((
         Camera2d,
+        // No MSAA: shapes come from pre-antialiased textures; saves a lot of GPU memory
+        // at 2x scale factor.
+        Msaa::Off,
         Projection::Orthographic(OrthographicProjection {
             scaling_mode: ScalingMode::AutoMin { min_width: W, min_height: H },
             ..OrthographicProjection::default_2d()

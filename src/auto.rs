@@ -2,7 +2,7 @@
 //! `GG_AUTOPLAY=pattern@bpm` starts that level, `GG_SHOTS=3,9.5` saves screenshots at those
 //! seconds to `GG_SHOT_DIR` (default `.`), `GG_END_AT=8` ends the run early (scores the
 //! full bars played so far), `GG_LISTEN_AT=10` starts listen-back of the worst section,
-//! `GG_EXIT_AT=12` quits.
+//! `GG_EXIT_AT=12` quits, `GG_SCREEN=settings` opens the settings screen.
 
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
@@ -54,6 +54,10 @@ pub fn auto_system(mut auto: ResMut<Auto>, mut game: ResMut<Game>, time: Res<Tim
         && let Some(pat) = pattern_by_id(&p)
     {
         game.start_level(pat, b, false);
+    }
+    if prev == 0.0 && std::env::var("GG_SCREEN").as_deref() == Ok("settings") {
+        game.refresh_lists();
+        game.screen = crate::game::Screen::Settings;
     }
     if auto.end_at.is_some_and(crossed) {
         game.end_early();
