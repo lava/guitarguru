@@ -12,7 +12,6 @@ mod patterns;
 mod progress;
 mod score;
 mod session;
-mod ui_common;
 mod ui_menu;
 mod ui_play;
 mod ui_results;

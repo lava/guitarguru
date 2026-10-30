@@ -41,9 +41,6 @@ pub fn stage_for(bpm: u32, ingredients: u32) -> u32 {
     1 + (points / 3).min(4)
 }
 
-pub fn stage_points(bpm: u32, ingredients: u32) -> u32 {
-    bpm.saturating_sub(BPM_MIN) / BPM_STEP + 2 * ingredients
-}
 
 #[derive(Resource)]
 pub struct MascotImages {

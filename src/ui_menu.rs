@@ -61,10 +61,6 @@ pub fn link(p: &mut Paint, x: f32, y: f32, s: &str) -> bool {
     p.clicked && hov
 }
 
-pub fn truncate(s: &str, n: usize) -> String {
-    if s.chars().count() <= n { s.to_string() } else { s.chars().take(n - 1).collect::<String>() + "\u{2026}" }
-}
-
 fn ingredient_list(mask: u8) -> String {
     let names: Vec<String> = INGREDIENTS.iter().filter(|i| mask & i.bit != 0).map(|i| i.name.to_lowercase()).collect();
     names.join(", ")

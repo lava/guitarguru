@@ -65,6 +65,7 @@ pub struct ResultsState {
     pub listening: Option<usize>,
     pub calibration: bool,
     /// Spectral centroid (Hz) per report note (None if missed).
+    #[allow(dead_code)]
     pub centroids: Vec<Option<f64>>,
 }
 
@@ -75,6 +76,8 @@ pub struct SettingsLists {
     pub nams: Vec<String>,
     pub irs: Vec<String>,
     pub input_scroll: usize,
+    pub output_scroll: usize,
+    pub cab_scroll: usize,
     pub show_all: bool,
 }
 

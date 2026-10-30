@@ -11,7 +11,6 @@ use crate::game::Game;
 use crate::mascot::{self, MascotImages, Mood, STAGE_NAMES, STAGE_NODS};
 use crate::paint::{Align, Font, Paint, col};
 use crate::patterns::{BEATS_PER_BAR, INGREDIENTS, PATTERNS, Pattern, bar_seconds, beat_seconds, sixteenth_seconds};
-use crate::ui_common::dim;
 
 pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
     let mut end_now = false;
@@ -245,6 +244,5 @@ pub fn stroke_diagram(p: &mut Paint, pat: &Pattern, x0: f32, top: f32, cell: f32
         let px = x0 + ph.clamp(0.0, 16.0) * cell;
         p.rect(px - 0.75, top + 8.0, 1.5, bottom - top - 12.0, a(col::OCHRE));
     }
-    let _ = dim;
     bottom
 }

@@ -2,7 +2,7 @@
 //! `GG_AUTOPLAY=mix:pm+16@120` (run) or `GG_AUTOPLAY=gallop@120` (drill) starts that level, `GG_SHOTS=3,9.5` saves screenshots at those
 //! seconds to `GG_SHOT_DIR` (default `.`), `GG_END_AT=8` ends the run early (scores the
 //! full bars played so far), `GG_LISTEN_AT=10` starts listen-back of the worst section,
-//! `GG_FAKE_OUTPUT=1` replaces only the output with a silent one, `GG_EXIT_AT=12` quits, `GG_SCREEN=settings` opens the settings screen.
+//! `GG_FAKE_OUTPUT=1` replaces only the output with a silent one, `GG_EXIT_AT=12` quits, `GG_SCREEN=settings` opens the settings screen, `GG_SCROLLS=17:700` scrolls to 700 px at 17 s.
 
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
@@ -19,6 +19,7 @@ pub struct Auto {
     listen_at: Option<f32>,
     exit_at: Option<f32>,
     dir: String,
+    scrolls: Vec<(f32, f32)>,
 }
 
 fn num(name: &str) -> Option<f32> {
@@ -40,6 +41,9 @@ impl Auto {
             listen_at: num("GG_LISTEN_AT"),
             exit_at: num("GG_EXIT_AT"),
             dir: std::env::var("GG_SHOT_DIR").unwrap_or_else(|_| ".".into()),
+            scrolls: std::env::var("GG_SCROLLS")
+                .map(|v| v.split(',').filter_map(|p| p.split_once(':')).filter_map(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?))).collect())
+                .unwrap_or_default(),
         }
     }
 }
@@ -58,6 +62,11 @@ pub fn auto_system(mut auto: ResMut<Auto>, mut game: ResMut<Game>, time: Res<Tim
     if prev == 0.0 && std::env::var("GG_SCREEN").as_deref() == Ok("settings") {
         game.refresh_lists();
         game.screen = crate::game::Screen::Settings;
+    }
+    for (at, px) in auto.scrolls.clone() {
+        if crossed(at) {
+            game.scroll = px;
+        }
     }
     if auto.end_at.is_some_and(crossed) {
         game.end_early();

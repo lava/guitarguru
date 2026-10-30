@@ -335,6 +335,7 @@ pub struct Recording {
 pub struct EngineInfo {
     pub sample_rate: u32,
     pub input_label: String,
+    #[allow(dead_code)]
     pub output_label: String,
     pub input_buffer: String,
     pub output_buffer: String,

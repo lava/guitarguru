@@ -82,6 +82,7 @@ pub struct Ingredient {
     pub bit: u8,
     pub code: &'static str,
     pub name: &'static str,
+    #[allow(dead_code)] // descriptive data for future UI
     pub about: &'static str,
 }
 
@@ -217,7 +218,9 @@ pub struct BarNote {
     pub pm: bool,
 }
 
-/// A stroke of the picking hand: played or not (ghost).
+/// A stroke of the picking hand: played or not (ghost). Kept for analysis and tests;
+/// the UI draws played strokes only.
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Stroke {
     pub pos: f64,
@@ -303,6 +306,7 @@ impl Pattern {
     pub fn bar(&self) -> Vec<BarNote> {
         parse(self.notation).expect("built-in pattern must parse")
     }
+    #[cfg_attr(not(test), allow(dead_code))]
     /// The picking grid in sixteenths per stroke: 2 for `8:` patterns, 1 for 16th-based
     /// ones, None for triplet patterns (no ghost strokes shown).
     pub fn grid_step(&self) -> Option<f64> {
@@ -315,6 +319,7 @@ impl Pattern {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     /// Every stroke of the alternate-picking hand in one bar, played or ghost.
     pub fn strokes(&self) -> Vec<Stroke> {
         let hits = self.hits();

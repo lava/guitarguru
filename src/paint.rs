@@ -43,10 +43,7 @@ pub mod col {
     pub const ONTIME: Color = hex(0x1f, 0x7a, 0x6e);
     pub const TEAL_TINT: Color = hex(0xd6, 0xe8, 0xe2);
     pub const LATE: Color = hex(0xb5, 0x45, 0x2f);
-    pub const MISS: Color = LATE;
     pub const TONE: Color = hex(0x7b, 0x4a, 0x9a);
-    pub const GOOD: Color = ONTIME;
-    pub const BAD: Color = LATE;
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -360,14 +357,6 @@ impl Paint {
         self.hline(x, y + h - 1.0, w, col::LINE);
         self.clicked && hov
     }
-    /// A selectable row/chip (compat with older screens): radio row without note.
-    pub fn choice(&mut self, x: f32, y: f32, w: f32, h: f32, label: &str, selected: bool) -> bool {
-        self.radio_row(x, y, w, h, label, "", selected)
-    }
-    pub fn panel(&mut self, x: f32, y: f32, w: f32, h: f32) {
-        self.hline(x, y, w, col::LINE);
-        let _ = h;
-    }
 }
 
 /// Truncate `s` to fit `w` design pixels at font `size` (proportional fonts, ~0.5 em per
@@ -460,8 +449,8 @@ fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>, assets: Res<
     let petal = images.add(shape_image(96, |u, v| {
         let (x, y) = ((u - 0.5) * 2.0, (v - 0.5) * 2.0);
         // lens: |x| <= w(y), w(y) = sqrt(R^2 - y^2) - (R - 1), R chosen so w(0) = 1
-        let r = 1.0f32;
-        let w = (r * r - y * y).max(0.0).sqrt() - (r - 1.0);
+        // Pointed at both ends, fuller towards the inner end.
+        let w = (1.0 - y * y).max(0.0).powf(0.9) * (1.0 - 0.12 * y);
         if x.abs() <= w * 0.98 { 1.0 } else { 0.0 }
     }));
     let grain = images.add(grain_image(256));
