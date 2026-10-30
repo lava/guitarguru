@@ -159,7 +159,7 @@ impl RunData {
         let mut cands = Vec::new();
         let mut start = 0;
         while start + wb <= self.plan.scored_bars {
-            // Windows stay within one segment (one pattern in a run; a multi-bar riff in a drill).
+            // Windows stay within one segment (one pattern).
             let pat = self.plan.bar_patterns[start as usize];
             let seg = start / crate::patterns::SEGMENT_BARS;
             let same_seg = (start..start + wb).all(|b| b / crate::patterns::SEGMENT_BARS == seg);
@@ -382,7 +382,7 @@ pub fn saved_sequence(j: &serde_json::Value) -> Result<Sequence, String> {
         let defs = j.get("patterns").and_then(|v| v.as_array()).ok_or("missing pattern definitions")?;
         let mut patterns: Vec<Pattern> = Vec::new();
         for d in defs {
-            let mut p: Pattern = serde_json::from_value(d.clone()).map_err(|e| format!("bad pattern definition: {e}"))?;
+            let p: Pattern = serde_json::from_value(d.clone()).map_err(|e| format!("bad pattern definition: {e}"))?;
             crate::patterns::parse(&p.notation)?;
             if let Some(f) = &p.frets {
                 let n = f.split_whitespace().map(crate::patterns::Fretting::parse).collect::<Result<Vec<_>, _>>()?.len();
@@ -390,7 +390,6 @@ pub fn saved_sequence(j: &serde_json::Value) -> Result<Sequence, String> {
                     return Err(format!("pattern {}: {n} frettings for {} notes", p.id, p.hits().len()));
                 }
             }
-            p.in_tracks = true;
             patterns.push(p);
         }
         let bar_patterns = bar_ids
@@ -502,7 +501,7 @@ mod tests {
 
     #[test]
     fn full_run_from_synth_signal() {
-        let level = Level::drill(PATTERNS.iter().position(|p| p.id == "pursuit").unwrap(), 120);
+        let level = Level::drill(PATTERNS.iter().position(|p| p.id == "gallop").unwrap(), 120);
         let plan = SessionPlan::new(&level, 2, 20.0);
         let offset = 0.250; // recording started 250 ms before the first click (+ latency)
         let mut rng = Rng::new(1);
@@ -529,7 +528,7 @@ mod tests {
         assert!(worst[0].start_bar == 3 || worst[0].start_bar == 4, "{worst:?}");
         let audio = run.render_listen(&worst[0], 0.3, rep.level_median_db);
         let expect = (4.0 + 0.5 + 0.25) * 48000.0;
-        assert_eq!(worst[0].pattern_id, "pursuit"); // 2 bars + 1 beat lead-in + half-beat tail
+        assert_eq!(worst[0].pattern_id, "gallop"); // 2 bars + 1 beat lead-in + half-beat tail
         assert!((audio.len() as f64 - expect).abs() < 2.0, "{}", audio.len());
     }
 

@@ -666,9 +666,7 @@ fn build(on: &[bool; 16], pm: &[bool], frets: Option<&[Fretting]>, name: &str, m
         name: Cow::Owned(name.to_string()),
         needs: 0,
         notation: Cow::Owned(notation),
-        in_tracks: true,
         frets: frets.map(Cow::Owned),
-        then: None,
     };
     p.needs = features(&p) & mask;
     p
@@ -712,7 +710,7 @@ pub fn pool(mask: u8, bpm: u32, seed: u64, attempts: usize) -> Vec<Entry> {
             out.push(Entry { pattern: p, difficulty, featured });
         }
     };
-    for p in PATTERNS.iter().filter(|p| p.in_tracks && p.needs & !mask == 0) {
+    for p in PATTERNS.iter().filter(|p| p.needs & !mask == 0) {
         add(p.clone(), &mut out);
     }
     let mut rng = Rng::new(seed);
@@ -978,7 +976,7 @@ mod tests {
             assert!(sync(s), "{s}");
         }
         // Curated patterns declare it.
-        for p in PATTERNS.iter().filter(|p| p.in_tracks) {
+        for p in PATTERNS.iter() {
             assert_eq!(features(p) & SYNC, p.needs & SYNC, "{}", p.id);
         }
     }

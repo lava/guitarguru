@@ -37,17 +37,11 @@ pub struct Pattern {
     /// Ingredients this pattern needs (bit mask, see `INGREDIENTS`); 0 = basic.
     pub needs: u8,
     pub notation: Str,
-    /// Used in runs (false: drill only, e.g. named riffs).
-    #[serde(skip)]
-    pub in_tracks: bool,
     /// Fretting per played note, space separated: string letter (`E A D G B e`, low to
     /// high) + fret, `p` suffix for a 5th power chord (root + the next string two frets up),
     /// e.g. `E0 E3 A5p`. None = every note on the open low E.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frets: Option<Str>,
-    /// For multi-bar riffs: the pattern id of the next bar (drills alternate through them).
-    #[serde(skip)]
-    pub then: Option<Str>,
 }
 
 /// Where a note is played. Strings are numbered 1 (high e) to 6 (low E), E standard.
@@ -133,7 +127,7 @@ pub fn mask_name(mask: u8) -> String {
 }
 
 const fn pat(id: &'static str, name: &'static str, needs: u8, notation: &'static str) -> Pattern {
-    Pattern { id: Cow::Borrowed(id), name: Cow::Borrowed(name), needs, notation: Cow::Borrowed(notation), in_tracks: true, frets: None, then: None }
+    Pattern { id: Cow::Borrowed(id), name: Cow::Borrowed(name), needs, notation: Cow::Borrowed(notation), frets: None }
 }
 
 /// A pattern with changing notes (left hand).
@@ -143,28 +137,7 @@ const fn lh(id: &'static str, name: &'static str, needs: u8, notation: &'static 
         name: Cow::Borrowed(name),
         needs: needs | LH,
         notation: Cow::Borrowed(notation),
-        in_tracks: true,
         frets: Some(Cow::Borrowed(frets)),
-        then: None,
-    }
-}
-
-/// A drill-only riff bar.
-const fn riff(id: &'static str, name: &'static str, needs: u8, notation: &'static str, frets: Option<&'static str>, then: Option<&'static str>) -> Pattern {
-    Pattern {
-        id: Cow::Borrowed(id),
-        name: Cow::Borrowed(name),
-        needs,
-        notation: Cow::Borrowed(notation),
-        in_tracks: false,
-        frets: match frets {
-            Some(f) => Some(Cow::Borrowed(f)),
-            None => None,
-        },
-        then: match then {
-            Some(t) => Some(Cow::Borrowed(t)),
-            None => None,
-        },
     }
 }
 
@@ -219,15 +192,14 @@ pub const PATTERNS: &[Pattern] = &[
     lh("lh_tremolo_walk", "Tremolo walk", S16 | TREM, "16:dudududududududu", "E0 E0 E0 E0 E2 E2 E2 E2 E3 E3 E3 E3 E5 E5 E5 E5"),
     lh("lh_chords", "Power chords", 0, "8:D-D-D-D-", "E0p E0p E3p E5p"),
     lh("lh_chords_pm", "P.M. power chords", PM, "8:dddddddd", "E0p E0p E0p E0p E3p E3p E5p E5p"),
-    // Drill-only named riffs (Pursuit of Vikings, Amon Amarth; frets as in E standard).
-    riff("pursuit", "Pursuit of Vikings: intro", S16, "16:d-dud-d-dud-dud-", None, None),
-    riff("pursuit_verse", "Pursuit of Vikings: verse", S16 | LH, "16:D-dud-D-D-d-D-d-", Some("A7 E0 E0 E0 A9 A10 E0 A7 E0"), Some("pursuit_verse_b")),
-    riff("pursuit_verse_b", "Pursuit of Vikings: verse (bar 2)", S16 | LH, "16:D-dud-d-dud-dud-", Some("D9 E0 E0 E0 E0 E0 E0 E0 E0 E0 E0"), Some("pursuit_verse")),
 ];
 
-/// Patterns only reachable as the later bars of a multi-bar riff (not listed as drills).
-pub fn is_riff_continuation(i: usize) -> bool {
-    PATTERNS[..i].iter().any(|p| p.then.as_deref() == Some(&*PATTERNS[i].id))
+/// The patterns offered as drills, in list order (ids in `PATTERNS`).
+pub const DRILLS: [&str; 3] = ["quarters", "alt_eighths", "gallop"];
+
+/// Indices into `PATTERNS` of the drills.
+pub fn drills() -> Vec<usize> {
+    DRILLS.iter().filter_map(|id| PATTERNS.iter().position(|p| p.id == *id)).collect()
 }
 
 #[cfg(test)]
@@ -470,18 +442,10 @@ impl Level {
     }
     /// The patterns of a session of `bars` scored bars. Runs draw a fresh sequence per
     /// `seed`, passing over the pattern ids in `avoid` (see `generator::run_sequence`);
-    /// drills play their pattern (multi-bar riffs cycle through their bars).
+    /// drills play their pattern.
     pub fn sequence(&self, bars: u32, seed: u64, avoid: &std::collections::HashSet<String>) -> Sequence {
         match self.kind {
-            LevelKind::Drill(p) => {
-                let mut order = Vec::with_capacity(bars as usize);
-                let mut cur = p;
-                for _ in 0..bars {
-                    order.push(cur);
-                    cur = PATTERNS[cur].then.as_deref().and_then(|id| PATTERNS.iter().position(|q| q.id == id)).unwrap_or(p);
-                }
-                Sequence::from_static(&order)
-            }
+            LevelKind::Drill(p) => Sequence::from_static(&vec![p; bars as usize]),
             LevelKind::Run(m) => crate::generator::run_sequence(m, self.bpm, bars, seed, avoid),
         }
     }
@@ -625,26 +589,16 @@ mod tests {
                 let n = f.split_whitespace().map(Fretting::parse).collect::<Result<Vec<_>, _>>().unwrap();
                 assert_eq!(n.len(), p.hits().len(), "{}: one fretting per played note", p.id);
             }
-            if let Some(t) = &p.then {
-                assert!(PATTERNS.iter().any(|q| q.id == *t), "{}: unknown next bar {t}", p.id);
-            }
         }
-        let verse = PATTERNS.iter().position(|p| p.id == "pursuit_verse").unwrap();
-        let seq = Level::drill(verse, 120).sequence(4, 0, &Default::default());
-        assert_eq!(seq.bar_patterns.iter().map(|&i| &*seq.patterns[i].id).collect::<Vec<_>>(), ["pursuit_verse", "pursuit_verse_b", "pursuit_verse", "pursuit_verse_b"]);
+        assert_eq!(drills().len(), DRILLS.len(), "every drill is a pattern");
         assert_eq!(Fretting::parse("A5p").unwrap().midi(), 50);
         assert_eq!(Fretting::OPEN_E.midi(), 40);
-        let b = PATTERNS.iter().position(|p| p.id == "pursuit_verse_b").unwrap();
-        assert!(is_riff_continuation(b) && !is_riff_continuation(verse));
     }
 
     #[test]
-    fn pursuit_positions() {
-        let p = pattern_by_id("pursuit").unwrap();
-        let pos: Vec<f64> = p.hits().iter().map(|n| n.pos).collect();
+    fn positions() {
         assert_eq!(pattern_by_id("q_ee").unwrap().hits().iter().map(|n| n.pos).collect::<Vec<_>>(), vec![0.0, 4.0, 6.0, 8.0, 12.0, 14.0]);
-        assert_eq!(pos, vec![0.0, 2.0, 3.0, 4.0, 6.0, 8.0, 9.0, 10.0, 12.0, 13.0, 14.0]);
-        assert!(p.hits().iter().all(|n| n.pm));
+        assert!(pattern_by_id("gallop").unwrap().hits().iter().all(|n| n.pm));
         assert!(!pattern_by_id("quarters").unwrap().hits()[0].pm);
     }
 
@@ -653,7 +607,6 @@ mod tests {
         let dirs = |id: &str| pattern_by_id(id).unwrap().hits().iter().map(|n| if n.downstroke() { 'D' } else { 'U' }).collect::<String>();
         assert_eq!(dirs("gallop"), "DDUDDUDDUDDU");
         assert_eq!(dirs("reverse_gallop"), "DUDDUDDUDDUD");
-        assert_eq!(dirs("pursuit"), "DDUDDDUDDUD");
         assert_eq!(dirs("q_ee"), "DDUDDU");
         assert_eq!(dirs("offbeats"), "UUUU");
         assert_eq!(dirs("eighths"), "DDDDDDDD");
@@ -676,10 +629,9 @@ mod tests {
         assert_eq!(a, l.sequence(60, 5, &none), "same seed, same run");
         assert_ne!(a, l.sequence(60, 6, &none), "another seed, another run");
         assert_eq!(a.seed, Some(5));
-        assert!(!a.patterns.iter().any(|p| p.id.starts_with("pursuit")), "drill-only riffs stay out of runs");
         assert_eq!(a.patterns[a.bar_patterns[0]].id, "quarters", "runs start with quarters");
         for i in INGREDIENTS {
-            assert!(PATTERNS.iter().any(|p| p.needs & i.bit != 0 && p.in_tracks), "{} has patterns", i.name);
+            assert!(PATTERNS.iter().any(|p| p.needs & i.bit != 0), "{} has patterns", i.name);
         }
         let l = Level::run(S16, 100);
         let plan = SessionPlan::new(&l, 2, 120.0);
@@ -690,7 +642,7 @@ mod tests {
         assert_eq!(l.key(), "mix:16@100");
         assert_eq!(Level::from_key("mix:basic@80"), Some(Level::run(0, 80)));
         assert_eq!(Level::from_key("gallop@80"), Some(Level::drill(idx("gallop"), 80)));
-        assert_eq!(PATTERNS[idx("pursuit")].drill_needs(), S16 | PM);
+        assert_eq!(PATTERNS[idx("gallop")].drill_needs(), S16 | PM);
         for t in ["E0", "A5p", "D9", "e12"] {
             assert_eq!(Fretting::parse(t).unwrap().token(), t);
         }

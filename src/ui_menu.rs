@@ -8,7 +8,7 @@ use bevy::input::keyboard::KeyCode;
 use crate::game::{Game, Screen, calibration_level};
 use crate::mascot::{self, MascotImages, Mood};
 use crate::paint::{Align, Font, Paint, col, fit};
-use crate::patterns::{BPM_MAX, BPM_MIN, BPM_STEP, INGREDIENTS, Level, LevelKind, PATTERNS, bpm_steps, is_riff_continuation};
+use crate::patterns::{BPM_MAX, BPM_MIN, BPM_STEP, INGREDIENTS, Level, LevelKind, PATTERNS, bpm_steps, drills};
 use crate::progress::PASS_THRESHOLD;
 
 const RX: f32 = 653.0;
@@ -229,10 +229,10 @@ pub fn draw(g: &mut Game, p: &mut Paint, keys: &ButtonInput<KeyCode>, imgs: &Mas
         return;
     }
 
-    // ---------- drills (fit the toggled ingredients, at the selected tempo)
+    // ---------- drills (at the selected tempo; locked until their ingredients are)
     let (dx, dw) = (843.0, 477.0);
     p.label(dx, 670.0, &format!("drills \u{b7} {} bpm", sel.bpm));
-    let drills: Vec<usize> = (0..PATTERNS.len()).filter(|&i| !is_riff_continuation(i) && PATTERNS[i].drill_needs() & !mix == 0).collect();
+    let drills = drills();
     let (row_h, visible) = (40.0, 5usize);
     let max_first = drills.len().saturating_sub(visible);
     if p.hover(dx, 686.0, dw, row_h * visible as f32) && p.scroll != 0.0 {
