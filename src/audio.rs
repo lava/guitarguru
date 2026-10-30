@@ -31,12 +31,11 @@ pub struct AudioSettings {
     pub output_device: Option<String>,
     pub buffer_frames: u32,
     pub click_volume_db: f32,
-    pub monitor: bool,
 }
 
 impl Default for AudioSettings {
     fn default() -> Self {
-        Self { input_device: None, input_channel: 0, output_device: None, buffer_frames: 128, click_volume_db: -4.0, monitor: true }
+        Self { input_device: None, input_channel: 0, output_device: None, buffer_frames: 128, click_volume_db: -4.0 }
     }
 }
 
@@ -422,7 +421,7 @@ impl AudioEngine {
     pub fn start(settings: &AudioSettings, tone: &ToneSettings) -> Result<Self, String> {
         let shared = Arc::new(Shared::default());
         shared.click_gain.store(10f32.powf(settings.click_volume_db / 20.0));
-        shared.monitor_on.store(settings.monitor && tone.preset.monitors(), Ordering::Relaxed);
+        shared.monitor_on.store(tone.preset.monitors(), Ordering::Relaxed);
         *shared.chain.lock().unwrap() = Some(Box::new(Chain::build(tone, SAMPLE_RATE)));
         let recording = Arc::new(Mutex::new(Recording::default()));
         let (stop_tx, stop_rx) = mpsc::channel::<()>();

@@ -1,6 +1,6 @@
 //! Monitoring DSP ("amp sound"): input gain -> noise gate -> amp (NAM or fallback drive)
 //! -> cab IR (uniformly partitioned FFT convolution) -> room -> output level.
-//! Sound presets: heavy (the amp and cab chosen in Setup), a classic rock crunch
+//! Fixed sound presets: heavy (the Soldano capture into a V30 cab), a classic rock crunch
 //! (the Soldano capture driven much softer) and a clean studio sound (no amp model:
 //! compression, a touch of saturation, a warm cab and a small room), plus mute for players
 //! with their own amp on a splitter (no monitoring, nothing loaded). The presets'
@@ -16,20 +16,10 @@ use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_ASSET_DIR: &str = "tones";
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum AmpChoice {
-    /// Plain DI.
-    Clean,
-    /// Built-in drive (pre-emphasis + tanh), the fallback without NAM.
-    Drive,
-    /// A `.nam` file name inside the asset directory.
-    Nam(String),
-}
-
 /// The guitar sound.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SoundPreset {
-    /// High gain: the amp and cab chosen in Setup.
+    /// High gain.
     #[default]
     Heavy,
     /// Classic rock'n'roll crunch.
@@ -54,29 +44,47 @@ impl SoundPreset {
     pub fn monitors(self) -> bool {
         self != SoundPreset::Mute
     }
+
+    /// What the preset is built from (None for mute).
+    fn recipe(self) -> Option<Recipe> {
+        const SOLDANO: &str = "Lum-Soldano-SLO100-3.nam";
+        const V30: &str = "1_Cookie_Monster.wav";
+        match self {
+            SoundPreset::Heavy => Some(Recipe { amp: RecipeAmp::Nam(SOLDANO), cab: V30, drive_db: 0.0, gate_offset_db: 0.0, trim_db: 0.0, room: false }),
+            SoundPreset::Crunch => Some(Recipe { amp: RecipeAmp::Nam(SOLDANO), cab: V30, drive_db: -18.0, gate_offset_db: -6.0, trim_db: 5.0, room: false }),
+            // A darker, mid-forward cab (DV-77).
+            SoundPreset::Clean => {
+                Some(Recipe { amp: RecipeAmp::Studio, cab: "2_Darth_Genocider.wav", drive_db: 0.0, gate_offset_db: -15.0, trim_db: 6.0, room: true })
+            }
+            SoundPreset::Mute => None,
+        }
+    }
 }
 
-/// Crunch: the Soldano capture with the input this much lower, into a V30 cab.
-const CRUNCH_NAM: &str = "Lum-Soldano-SLO100-3.nam";
-const CRUNCH_DRIVE_DB: f32 = -18.0;
-const CRUNCH_CAB: &str = "1_Cookie_Monster.wav";
-/// Clean: a darker, mid-forward cab (DV-77).
-const CLEAN_CAB: &str = "2_Darth_Genocider.wav";
-/// Output trims (dB) that match the presets' loudness to heavy's, measured on DI takes.
-const CRUNCH_TRIM_DB: f32 = 5.0;
-const CLEAN_TRIM_DB: f32 = 6.0;
-/// The gate opens lower for the cleaner sounds, whose decays stay audible.
-const CRUNCH_GATE_OFFSET_DB: f32 = -6.0;
-const CLEAN_GATE_OFFSET_DB: f32 = -15.0;
+enum RecipeAmp {
+    /// A `.nam` file in the asset directory (the built-in drive if it fails to load).
+    Nam(&'static str),
+    /// No model: compressor and light saturation.
+    Studio,
+}
+
+/// A preset's chain: amp, cab IR (in the asset directory), the amp's input drive, the gate
+/// relative to the setting, the output trim that matches heavy's loudness (measured on DI
+/// takes, see `preset_loudness`), and a small room.
+struct Recipe {
+    amp: RecipeAmp,
+    cab: &'static str,
+    drive_db: f32,
+    gate_offset_db: f32,
+    trim_db: f32,
+    room: bool,
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ToneSettings {
     pub preset: SoundPreset,
     pub asset_dir: PathBuf,
-    pub amp: AmpChoice,
-    /// IR file name inside the asset directory, or None.
-    pub cab: Option<String>,
     pub input_gain_db: f32,
     pub gate_db: f32,
     pub output_db: f32,
@@ -87,27 +95,11 @@ impl Default for ToneSettings {
         Self {
             preset: SoundPreset::Heavy,
             asset_dir: PathBuf::from(DEFAULT_ASSET_DIR),
-            amp: AmpChoice::Nam("Lum-Soldano-SLO100-3.nam".into()),
-            cab: Some("1_Cookie_Monster.wav".into()),
             input_gain_db: 3.0,
             gate_db: -55.0,
             output_db: -6.0,
         }
     }
-}
-
-pub fn list_assets(dir: &Path, ext: &str) -> Vec<String> {
-    let mut v: Vec<String> = std::fs::read_dir(dir)
-        .map(|rd| {
-            rd.filter_map(|e| e.ok())
-                .filter_map(|e| e.file_name().into_string().ok())
-                .filter(|n| n.to_lowercase().ends_with(ext))
-                .collect()
-        })
-        .unwrap_or_default();
-    // Jester IRs are "N_Name.wav": sort numerically.
-    v.sort_by_key(|n| (n.split('_').next().and_then(|p| p.parse::<u32>().ok()).unwrap_or(u32::MAX), n.clone()));
-    v
 }
 
 fn db(x: f32) -> f32 {
@@ -426,6 +418,7 @@ pub fn load_ir(path: &Path, sr: u32, max_len: usize) -> Result<Vec<f32>, String>
 }
 
 enum Amp {
+    /// Unprocessed (the mute chain, which never runs).
     Clean,
     Drive(Drive),
     /// Model and its output gain; `drive` scales its input.
@@ -446,60 +439,30 @@ pub struct Chain {
 }
 
 impl Chain {
-    /// Build the chain (loads files; call off the audio thread). Errors fall back to
-    /// the built-in drive and are reported in `description`.
+    /// Build the chain (loads files; call off the audio thread). A model that fails to
+    /// load falls back to the built-in drive; errors are reported in `description`.
     pub fn build(s: &ToneSettings, sr: u32) -> Self {
-        match s.preset {
-            SoundPreset::Heavy => Self::build_heavy(s, sr),
+        let srf = sr as f32;
+        let Some(r) = s.preset.recipe() else {
             // Never processed (monitoring is off); nothing is loaded.
-            SoundPreset::Mute => Self {
+            return Self {
                 in_gain: 1.0,
                 drive: 1.0,
                 out_gain: 0.0,
-                gate: Gate::new(s.gate_db, sr as f32),
+                gate: Gate::new(s.gate_db, srf),
                 amp: Amp::Clean,
                 cab: None,
                 room: None,
                 description: "muted: no monitoring (your own amp)".into(),
-            },
-            SoundPreset::Crunch => {
-                let t = ToneSettings {
-                    amp: AmpChoice::Nam(CRUNCH_NAM.into()),
-                    cab: Some(CRUNCH_CAB.into()),
-                    gate_db: s.gate_db + CRUNCH_GATE_OFFSET_DB,
-                    output_db: s.output_db + CRUNCH_TRIM_DB,
-                    ..s.clone()
-                };
-                let mut c = Self::build_heavy(&t, sr);
-                c.drive = db(CRUNCH_DRIVE_DB);
-                c.description = format!("crunch: {}, drive {CRUNCH_DRIVE_DB:+.0} dB", c.description);
-                c
+            };
+        };
+        let mut notes = vec![s.preset.name().to_lowercase()];
+        let amp = match r.amp {
+            RecipeAmp::Studio => {
+                notes.push("compressor, saturation".into());
+                Amp::Studio(Studio::new(srf))
             }
-            SoundPreset::Clean => {
-                let t = ToneSettings {
-                    amp: AmpChoice::Clean,
-                    cab: Some(CLEAN_CAB.into()),
-                    gate_db: s.gate_db + CLEAN_GATE_OFFSET_DB,
-                    output_db: s.output_db + CLEAN_TRIM_DB,
-                    ..s.clone()
-                };
-                let mut c = Self::build_heavy(&t, sr);
-                c.amp = Amp::Studio(Studio::new(sr as f32));
-                c.room = Some(Room::new(sr as f32, 0.18));
-                c.description = c.description.replace("clean DI", "clean: compressor, saturation") + ", small room";
-                c
-            }
-        }
-    }
-
-    /// The chain from the amp and cab settings as they are.
-    fn build_heavy(s: &ToneSettings, sr: u32) -> Self {
-        let srf = sr as f32;
-        let mut notes = Vec::new();
-        let amp = match &s.amp {
-            AmpChoice::Clean => Amp::Clean,
-            AmpChoice::Drive => Amp::Drive(Drive::new(srf)),
-            AmpChoice::Nam(file) => match load_nam(&s.asset_dir.join(file), sr) {
+            RecipeAmp::Nam(file) => match load_nam(&s.asset_dir.join(file), sr) {
                 Ok((m, gain)) => {
                     notes.push(format!("NAM {file}"));
                     Amp::Nam(Box::new(m), gain)
@@ -510,29 +473,30 @@ impl Chain {
                 }
             },
         };
-        if matches!(s.amp, AmpChoice::Drive) {
-            notes.push("built-in drive".into());
-        } else if matches!(s.amp, AmpChoice::Clean) {
-            notes.push("clean DI".into());
+        if r.drive_db != 0.0 {
+            notes.push(format!("drive {:+.0} dB", r.drive_db));
         }
-        let cab = s.cab.as_ref().and_then(|f| match load_ir(&s.asset_dir.join(f), sr, 4096) {
+        let cab = match load_ir(&s.asset_dir.join(r.cab), sr, 4096) {
             Ok(ir) => {
-                notes.push(format!("cab {f}"));
+                notes.push(format!("cab {}", r.cab));
                 Some(Convolver::new(&ir, 64))
             }
             Err(e) => {
                 notes.push(format!("cab failed: {e}"));
                 None
             }
-        });
+        };
+        if r.room {
+            notes.push("small room".into());
+        }
         Self {
             in_gain: db(s.input_gain_db),
-            drive: 1.0,
-            out_gain: db(s.output_db),
-            gate: Gate::new(s.gate_db, srf),
+            drive: db(r.drive_db),
+            out_gain: db(s.output_db + r.trim_db),
+            gate: Gate::new(s.gate_db + r.gate_offset_db, srf),
             amp,
             cab,
-            room: None,
+            room: r.room.then(|| Room::new(srf, 0.18)),
             description: notes.join(", "),
         }
     }
@@ -621,6 +585,9 @@ mod tests {
     fn presets_load_and_stay_bounded() {
         let old: ToneSettings = serde_json::from_str(r#"{"amp":{"Nam":"x.nam"},"cab":null}"#).unwrap();
         assert_eq!(old.preset, SoundPreset::Heavy, "configs from before presets");
+        // Configs with the removed amp, cab and monitoring keys still load.
+        let cfg: crate::config::Config = serde_json::from_str(r#"{"audio":{"monitor":false,"buffer_frames":256},"tone":{"amp":"Clean","cab":"8_Big_Bubba.wav","preset":"Crunch","gate_db":-50.0}}"#).unwrap();
+        assert_eq!((cfg.audio.buffer_frames, cfg.tone.preset, cfg.tone.gate_db), (256, SoundPreset::Crunch, -50.0));
         let back: ToneSettings = serde_json::from_str(&serde_json::to_string(&ToneSettings { preset: SoundPreset::Clean, ..old }).unwrap()).unwrap();
         assert_eq!(back.preset, SoundPreset::Clean);
         assert_eq!(soft_limit(0.5), 0.5);
@@ -724,7 +691,7 @@ mod tests {
         // input gain.
         let amp_in = p90 * db(base.input_gain_db);
         for drive in [0.0f32, -6.0, -10.0, -13.0, -16.0, -19.0, -22.0, -26.0] {
-            let (mut model, g) = load_nam(&base.asset_dir.join(CRUNCH_NAM), 48000).unwrap();
+            let (mut model, g) = load_nam(&base.asset_dir.join("Lum-Soldano-SLO100-3.nam"), 48000).unwrap();
             let n = 48000;
             let mut x: Vec<f32> = (0..n).map(|i| amp_in * db(drive) * (std::f32::consts::TAU * 110.0 * i as f32 / 48000.0).sin()).collect();
             for b in x.chunks_mut(128) {
@@ -742,7 +709,7 @@ mod tests {
             let total: f64 = y.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / y.len() as f64;
             let fund = (a * a + b * b) / 2.0;
             let thd = ((total - fund).max(0.0) / fund).sqrt();
-            let s = ToneSettings { preset: SoundPreset::Heavy, amp: AmpChoice::Nam(CRUNCH_NAM.into()), cab: Some(CRUNCH_CAB.into()), ..base.clone() };
+            let s = ToneSettings { preset: SoundPreset::Crunch, ..base.clone() };
             let mut chain = Chain::build(&s, 48000);
             chain.drive = db(drive);
             let mut yy = di.clone();

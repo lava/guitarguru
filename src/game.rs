@@ -78,11 +78,8 @@ pub struct ResultsState {
 pub struct SettingsLists {
     pub inputs: Vec<DeviceEntry>,
     pub outputs: Vec<DeviceEntry>,
-    pub nams: Vec<String>,
-    pub irs: Vec<String>,
     pub input_scroll: usize,
     pub output_scroll: usize,
-    pub cab_scroll: usize,
     pub show_all: bool,
 }
 
@@ -186,7 +183,7 @@ impl Game {
         self.cfg.tone.preset = preset;
         self.rebuild_chain();
         if let Some(e) = &self.engine {
-            e.shared.monitor_on.store(self.cfg.audio.monitor && preset.monitors(), Ordering::Relaxed);
+            e.shared.monitor_on.store(preset.monitors(), Ordering::Relaxed);
         }
     }
 
@@ -200,8 +197,6 @@ impl Game {
     pub fn refresh_lists(&mut self) {
         self.lists.inputs = crate::audio::list_devices(true, self.lists.show_all);
         self.lists.outputs = crate::audio::list_devices(false, self.lists.show_all);
-        self.lists.nams = crate::monitor::list_assets(&self.cfg.tone.asset_dir, ".nam");
-        self.lists.irs = crate::monitor::list_assets(&self.cfg.tone.asset_dir, ".wav");
     }
 
     pub fn update_meter(&mut self, dt: f32) {
