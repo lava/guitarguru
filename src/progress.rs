@@ -83,6 +83,21 @@ impl Progress {
     }
 }
 
+/// Relative difference in mean pattern difficulty from which the results screen notes that
+/// a run is not directly comparable with the best one.
+pub const DIFFICULTY_NOTE: f64 = 0.08;
+
+/// A note for the results screen when this run's patterns (mean difficulty `now`) were
+/// notably harder or easier than those of the previous best `best` of the same level.
+pub fn difficulty_note(now: f64, best: Option<&HistoryEntry>) -> Option<String> {
+    let then = best?.difficulty?;
+    if then <= 0.0 || (now / then - 1.0).abs() < DIFFICULTY_NOTE {
+        return None;
+    }
+    let word = if now > then { "harder" } else { "easier" };
+    Some(format!("{word} patterns than your best run (difficulty {now:.1} vs {then:.1})"))
+}
+
 /// What opened up after a result.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Unlock {
@@ -322,6 +337,16 @@ mod tests {
         assert_eq!(back.recent_patterns("mix:pm@100"), r);
         let old: Progress = serde_json::from_str(r#"{"best":{},"history":[{"key":"mix:basic@80","date":"","combined":1.0,"timing":0.0,"tone":0.0,"spread_ms":0.0,"level_std_db":0.0,"mean_offset_ms":null,"misses":0,"seconds":1.0}]}"#).unwrap();
         assert_eq!(old.history[0].difficulty, None);
+    }
+
+    #[test]
+    fn notes_notable_difficulty_differences() {
+        let best = |d| HistoryEntry { difficulty: d, ..Default::default() };
+        assert_eq!(difficulty_note(3.0, None), None);
+        assert_eq!(difficulty_note(3.0, Some(&best(None))), None, "old entries have no difficulty");
+        assert_eq!(difficulty_note(3.1, Some(&best(Some(3.0)))), None);
+        assert!(difficulty_note(3.5, Some(&best(Some(3.0)))).unwrap().starts_with("harder"));
+        assert!(difficulty_note(2.5, Some(&best(Some(3.0)))).unwrap().starts_with("easier"));
     }
 
     #[test]

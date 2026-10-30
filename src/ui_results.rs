@@ -128,6 +128,9 @@ pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
             p.text(x + 42.0, fy + 58.0, format!("{d:+.0}"), 12.0, if d >= 0.0 { col::ONTIME } else { col::LATE }, Align::Left);
         }
     }
+    if let Some(note) = &r.difficulty_note {
+        p.text(752.0, fy + 136.0, fit(note, 490.0, 12.0), 12.0, col::DIM, Align::Left);
+    }
     if !r.newly.is_empty() {
         let txt: Vec<String> = r.newly.iter().map(|u| u.label()).collect();
         p.label(752.0, 482.0, "opened");

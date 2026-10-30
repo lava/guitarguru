@@ -62,6 +62,8 @@ pub struct ResultsState {
     pub newly: Vec<crate::progress::Unlock>,
     pub saved: Result<std::path::PathBuf, String>,
     pub prev_best: Option<HistoryEntry>,
+    /// Set when this run's patterns were notably harder or easier than the previous best's.
+    pub difficulty_note: Option<String>,
     pub listening: Option<usize>,
     pub calibration: bool,
     /// Spectral centroid (Hz) per report note (None if missed).
@@ -395,7 +397,7 @@ impl Game {
                 difficulty: Some(difficulty),
             });
             if run.level.is_run() {
-                self.progress.remember_patterns(&key, run.plan.patterns.iter().map(|p| p.id.to_string()).collect());
+                self.progress.remember_patterns(&key, run.patterns_used().into_iter().map(|p| run.plan.patterns[p].id.to_string()).collect());
             }
             self.progress.save();
         }
@@ -406,6 +408,7 @@ impl Game {
             worst,
             newly,
             saved,
+            difficulty_note: if play.calibration { None } else { crate::progress::difficulty_note(difficulty, prev_best.as_ref()) },
             prev_best,
             listening: None,
             calibration: play.calibration,
