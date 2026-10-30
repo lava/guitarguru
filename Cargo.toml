@@ -1,0 +1,25 @@
+[package]
+name = "guitarguru"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bevy = { version = "0.20.1", default-features = false, features = ["2d", "ui"] }
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+cpal = "0.18.2"
+directories = "6.0.0"
+hound = "3.5.1"
+nam-rs = "0.4.0"
+realfft = "3.5.1"
+rtrb = "0.4.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+debug = 1
