@@ -1,9 +1,10 @@
 //! Play screen ("Guitar Guru" style). The guru keeps time with a head bob phase-locked to
 //! the click (audio clock); the dominant click dot flashes sindoor on beat one, indigo on
 //! the others. Below: the current pattern as thin pick arrows (played strokes only) or a
-//! tab, with a violet P.M. bracket and an ochre playhead, its name to the right; the next
+//! tab, with a violet P.M. bracket and an ochre playhead, its name above it; the next
 //! pattern comes in below it, at the same size, during the last two bars before a switch,
-//! with a countdown line during the very last one. No accuracy feedback during play.
+//! with a countdown line between the two during the very last one. No accuracy feedback
+//! during play.
 
 use bevy::color::{Alpha, Color};
 
@@ -16,10 +17,10 @@ use crate::patterns::{BEATS_PER_BAR, INGREDIENTS, PATTERNS, Pattern, bar_seconds
 const BAR_X: f32 = 141.0;
 const BAR_CELL: f32 = 53.0;
 const BAR_ARROW: f32 = 36.0;
-/// The column right of the bars with the section letter and pattern name.
-const NAME_X: f32 = 1030.0;
-const NAME_W: f32 = 290.0;
+/// Pattern name line above each bar: its size, and the distance from it to the bar's top.
 const NAME_SIZE: f32 = 22.0;
+const NAME_H: f32 = 26.0;
+const BAR_W: f32 = 16.0 * BAR_CELL;
 /// The preview is drawn a little lighter than the bar being played.
 const PREVIEW_ALPHA: f32 = 0.75;
 
@@ -103,7 +104,7 @@ pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
             }
         }
 
-        // ---------- current pattern, the bar on the left and its name to the right
+        // ---------- current pattern, its name above it
         // The session keeps recording a short tail after the last bar (see
         // `Game::tick_play`); hold the last bar, playhead at its end, until results show.
         let td = if waiting { t } else { t.min(total) };
@@ -117,16 +118,17 @@ pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
         let (pm_on, tab) = (play.level.pm_on(), play.level.tab());
         // Main bar and next-pattern preview share one size; the tab view is taller, so
         // its bars start right below the click dot.
-        let top = if tab { 492.0 } else { 520.0 };
-        let gap = if tab { 30.0 } else { 44.0 };
+        let name_y = if tab { 494.0 } else { 510.0 };
+        let gap = if tab { 34.0 } else { 52.0 };
         let cur_pat = &play.plan.patterns[cur];
         let playhead = if in_count_in { None } else { Some(pos16) };
-        let bottom = stroke_diagram(p, cur_pat, BAR_X, top, BAR_CELL, BAR_ARROW, playhead, pm_on, tab, 1.0);
-        p.label_at(NAME_X, top + 8.0, &section_letter(&play.plan.bar_patterns, cur), Align::Left, col::DIM);
-        pattern_name(p, &cur_pat.name, top + 36.0, col::TEXT);
+        let letter = section_letter(&play.plan.bar_patterns, cur);
+        pattern_name(p, &letter, &cur_pat.name, name_y, col::TEXT);
+        let bottom = stroke_diagram(p, cur_pat, BAR_X, name_y + NAME_H, BAR_CELL, BAR_ARROW, playhead, pm_on, tab, 1.0);
 
         // ---------- next pattern: comes in below during the last two bars before a switch
-        // (never on the song's last bar); the countdown line runs during the last bar only.
+        // (never on the song's last bar); the countdown line between the two runs during the
+        // last bar only.
         if !waiting {
             let next_switch = (bar_idx.max(0) + 1..i64::from(play.plan.scored_bars)).find(|&b| play.plan.pattern_at(b) != cur);
             if let Some(sb) = next_switch {
@@ -137,16 +139,14 @@ pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
                     let fade = (((lead - remain) / (0.5 * bar_s)) as f32).clamp(0.0, 1.0);
                     let alpha = PREVIEW_ALPHA * fade;
                     let y = bottom + gap + (1.0 - fade) * 16.0;
-                    stroke_diagram(p, next_pat, BAR_X, y, BAR_CELL, BAR_ARROW, None, pm_on, tab, alpha);
                     let a = |c: Color| c.with_alpha(alpha);
-                    p.label_at(NAME_X, y + 8.0, "next", Align::Left, a(col::DIM));
-                    let name_bottom = pattern_name(p, &next_pat.name, y + 36.0, a(col::TEXT));
+                    pattern_name(p, "next", &next_pat.name, y, a(col::TEXT));
+                    stroke_diagram(p, next_pat, BAR_X, y + NAME_H, BAR_CELL, BAR_ARROW, None, pm_on, tab, alpha);
                     if remain <= bar_s {
                         let k = (remain / bar_s) as f32;
-                        let lw = NAME_W;
-                        let ly = name_bottom + 6.0;
-                        p.rect(NAME_X, ly, lw, 1.0, a(col::LINE));
-                        p.rect(NAME_X + lw * (1.0 - k), ly - 0.5, lw * k, 2.0, a(col::OCHRE));
+                        let ly = bottom + (gap - 14.0) / 2.0;
+                        p.rect(BAR_X, ly, BAR_W, 1.0, a(col::LINE));
+                        p.rect(BAR_X + BAR_W * (1.0 - k), ly - 0.5, BAR_W * k, 2.0, a(col::OCHRE));
                     }
                 }
             }
@@ -160,42 +160,12 @@ pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
     }
 }
 
-/// A pattern name in the name column, wrapped onto up to three lines from `y` (baseline
-/// of the first). Returns the y below the last line.
-fn pattern_name(p: &mut Paint, name: &str, y: f32, color: Color) -> f32 {
-    let lines = wrap(name, NAME_W, NAME_SIZE, 3);
-    let lh = NAME_SIZE * 1.15;
-    for (i, l) in lines.iter().enumerate() {
-        p.serif(NAME_X, y + i as f32 * lh, l.clone(), NAME_SIZE, color, Align::Left);
-    }
-    y + (lines.len() as f32 - 1.0) * lh + NAME_SIZE * 0.5
-}
-
-/// Greedy word wrap with `fit`'s width estimate; the last line is truncated to fit.
-fn wrap(s: &str, w: f32, size: f32, max_lines: usize) -> Vec<String> {
-    let n = (w / (size * 0.52)).floor().max(2.0) as usize;
-    let mut lines: Vec<String> = Vec::new();
-    let mut cur = String::new();
-    for word in s.split_whitespace() {
-        if !cur.is_empty() && cur.chars().count() + 1 + word.chars().count() > n {
-            lines.push(std::mem::take(&mut cur));
-        }
-        if !cur.is_empty() {
-            cur.push(' ');
-        }
-        cur.push_str(word);
-    }
-    if !cur.is_empty() {
-        lines.push(cur);
-    }
-    if lines.len() > max_lines {
-        let rest = lines.split_off(max_lines - 1).join(" ");
-        lines.push(rest);
-    }
-    if let Some(last) = lines.last_mut() {
-        *last = fit(last, w, size);
-    }
-    lines
+/// A pattern's name on one line above its bar, centred on `y`, after a small label (the
+/// section letter, or "next").
+fn pattern_name(p: &mut Paint, label: &str, name: &str, y: f32, color: Color) {
+    let lw = label.chars().count() as f32 * 9.5 + 14.0;
+    p.label_at(BAR_X, y + 1.0, label, Align::Left, col::DIM.with_alpha(color.alpha()));
+    p.serif(BAR_X + lw, y - 2.0, fit(name, BAR_W - lw, NAME_SIZE), NAME_SIZE, color, Align::Left);
 }
 
 /// Section letter (A, B, ...) of a pattern by its first appearance in the run.
