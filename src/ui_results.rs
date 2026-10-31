@@ -139,17 +139,11 @@ pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
     if let Some(note) = &r.difficulty_note {
         p.text(752.0, fy + 136.0, fit(note, 490.0, 12.0), 12.0, col::DIM, Align::Left);
     }
-    let mut ly = 482.0;
     if !r.newly.is_empty() {
+        let ly = 482.0;
         let txt: Vec<String> = r.newly.iter().map(|u| u.label()).collect();
         p.label(752.0, ly, "opened");
         p.serif(816.0, ly - 4.0, fit(&txt.join(", "), 420.0, 22.0), 22.0, col::ONTIME, Align::Left);
-        ly += 34.0;
-    }
-    if let Some(s) = r.song {
-        // The guru's suggestion, in its italic voice.
-        let line = if s.advice.is_empty() { format!("Try: {}", s.label()) } else { format!("Try: {} \u{2013} {}", s.label(), s.advice) };
-        p.italic(752.0, ly - 4.0, fit(&line, 490.0, 21.0), 21.0, col::TEXT, Align::Left);
     }
     match &r.saved {
         Ok(path) => {

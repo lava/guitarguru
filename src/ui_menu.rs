@@ -3,7 +3,8 @@
 //! the mode switch between the tempo ladder and drills, and Setup. The main area shows the
 //! tempo ladder (BPM circles with unlock lines and a grade on every played tempo), the
 //! options of the mode (ingredient checkboxes for runs, where locked ones can be picked with
-//! an unlock token; the drill pattern for drills) and the Play button bottom right.
+//! an unlock token; the drill pattern for drills), the songs of the selected tempo (hidden
+//! ones as question marks, their requirements on hover) and the Play button bottom right.
 
 use bevy::color::Alpha;
 use bevy::input::ButtonInput;
@@ -13,8 +14,9 @@ use bevy::prelude::Color;
 use crate::game::{Game, Screen};
 use crate::mascot::{self, MascotImages, Mood, STAGE_NAMES};
 use crate::paint::{Align, Font, H, Paint, W, col, fit};
-use crate::patterns::{BPM_MAX, BPM_MIN, BPM_STEP, INGREDIENTS, Level, LevelKind, PATTERNS, bpm_steps, drills};
-use crate::progress::grade;
+use crate::patterns::{BASE_BPM, BPM_MAX, BPM_MIN, BPM_STEP, INGREDIENTS, Level, LevelKind, PATTERNS, bpm_steps, drills};
+use crate::progress::{PASS_THRESHOLD, grade};
+use crate::songs::{self, Song, Via};
 
 const RAIL_W: f32 = 360.0;
 /// Main area, left and right edge.
@@ -24,6 +26,8 @@ const NODE_R: f32 = 40.0;
 const LADDER_Y: f32 = 262.0;
 const OPTIONS_Y: f32 = 412.0;
 const TILE_H: f32 = 48.0;
+const SONGS_Y: f32 = OPTIONS_Y + TILE_H + 56.0;
+const SONG_ROW_H: f32 = 46.0;
 const S_FILL: Color = Color::srgb(0xe9 as f32 / 255.0, 0xc8 as f32 / 255.0, 0x77 as f32 / 255.0);
 
 fn node_x(bpm: u32) -> f32 {
@@ -97,6 +101,7 @@ pub fn draw(g: &mut Game, p: &mut Paint, keys: &ButtonInput<KeyCode>, imgs: &Mas
             }
         }
     }
+    song_list(g, p);
 
     // ---------- play button, bottom right
     let sel = g.selected;
@@ -233,21 +238,17 @@ fn ladder(g: &mut Game, p: &mut Paint, kind: LevelKind) -> Option<Level> {
             p.disc(x, cy, r, col::TEXT);
             p.serif(x, cy - 2.0, format!("{b}"), 30.0, col::BG, Align::Center);
         } else if passed {
-            p.disc(x, cy, r, col::TEAL_TINT);
-            p.ring(x, cy, r, col::ONTIME);
+            outlined(p, x, cy, r, col::ONTIME, if hov { col::PANEL } else { col::BG }, 1.5);
             p.serif(x, cy - 2.0, format!("{b}"), 30.0, col::ONTIME, Align::Center);
         } else if open {
-            if hov {
-                p.disc(x, cy, r, col::PANEL);
-            }
-            p.ring(x, cy, r, col::TEXT);
+            outlined(p, x, cy, r, col::TEXT, if hov { col::PANEL } else { col::BG }, 1.5);
             p.serif(x, cy - 2.0, format!("{b}"), 30.0, col::TEXT, Align::Center);
         } else {
             p.dashed_ring(x, cy, r, col::LINE);
             p.serif(x, cy - 2.0, format!("{b}"), 30.0, col::FAINT, Align::Center);
         }
         if let Some(s) = best {
-            grade_badge(p, x + r * 0.74, cy - r * 0.74, grade(s));
+            grade_badge(p, x + r * 0.74, cy - r * 0.74, grade(s), 14.0);
         }
         if g.progress.fresh.contains(&format!("tempo:{b}")) {
             p.disc(x - r * 0.74, cy - r * 0.74, 4.5, col::OCHRE);
@@ -267,19 +268,23 @@ fn ladder(g: &mut Game, p: &mut Paint, kind: LevelKind) -> Option<Level> {
     clicked
 }
 
-fn grade_badge(p: &mut Paint, cx: f32, cy: f32, g: char) {
+fn grade_badge(p: &mut Paint, cx: f32, cy: f32, g: char, r: f32) {
     let (fill, text, edge) = match g {
-        'S' => (S_FILL, col::TEXT, Some(col::GOLD)),
-        'A' => (col::ONTIME, Color::WHITE, None),
-        'B' => (col::TEAL_TINT, col::ONTIME, Some(col::ONTIME)),
-        _ => (col::PANEL2, col::DIM, Some(col::FAINT)),
+        'S' => (S_FILL, col::TEXT, col::GOLD),
+        'A' => (col::ONTIME, Color::WHITE, col::ONTIME),
+        'B' => (col::TEAL_TINT, col::ONTIME, col::ONTIME),
+        _ => (col::PANEL2, col::DIM, col::FAINT),
     };
-    p.disc(cx, cy, 17.0, col::BG);
-    p.disc(cx, cy, 14.0, fill);
-    if let Some(e) = edge {
-        p.ring(cx, cy, 14.0, e);
-    }
-    p.styled(cx, cy - 1.0, g.to_string(), 14.0, text, Align::Center, Font::SansBold, 0.0);
+    p.disc(cx, cy, r + 3.0, col::BG);
+    outlined(p, cx, cy, r, edge, fill, 1.5);
+    p.styled(cx, cy, g.to_string(), r, text, Align::Center, Font::SansBold, 0.0);
+}
+
+/// A filled disc with an edge, both in the shape layer so later shapes cover it (a
+/// `ring` is drawn above every shape).
+fn outlined(p: &mut Paint, cx: f32, cy: f32, r: f32, edge: Color, fill: Color, w: f32) {
+    p.disc(cx, cy, r, edge);
+    p.disc(cx, cy, r - w, fill);
 }
 
 /// Look of an option tile.
@@ -295,7 +300,7 @@ enum Tile {
 /// Width of a tile with this label (and a lock icon when locked).
 fn tile_w(label: &str, t: Tile) -> f32 {
     let lock = if matches!(t, Tile::Unlockable | Tile::Locked) { 24.0 } else { 0.0 };
-    14.0 + 22.0 + 12.0 + label.len() as f32 * 7.2 + lock + 18.0
+    14.0 + 22.0 + 12.0 + label.len() as f32 * 8.0 + lock + 18.0
 }
 
 /// An option tile with a checkbox (`radio` = false) or a radio dot. Returns true when
@@ -371,6 +376,7 @@ fn tile(p: &mut Paint, x: f32, y: f32, label: &str, t: Tile, radio: bool) -> boo
 /// Ingredient checkboxes (runs).
 fn ingredients(g: &mut Game, p: &mut Paint) {
     let mut x = MX;
+    let mut tip = false;
     for (i, ing) in INGREDIENTS.iter().enumerate() {
         let t = if g.progress.ingredient_unlocked(i) {
             if g.mix & ing.bit != 0 { Tile::On } else { Tile::Off }
@@ -404,8 +410,22 @@ fn ingredients(g: &mut Game, p: &mut Paint) {
         if g.progress.fresh.contains(&fresh_key) {
             p.disc(x + w - 6.0, OPTIONS_Y + 6.0, 4.0, col::OCHRE);
         }
+        if t == Tile::Locked && p.hover(x, OPTIONS_Y, w, TILE_H) {
+            tip = true;
+        }
         x += w + 12.0;
     }
+    // An ingredient unlocks after a pass with all unlocked ones on (`Progress::record`).
+    if tip {
+        let m = g.progress.unlocked_mask();
+        let with = if m == 0 { "basic".into() } else { mask_names(m) };
+        p.tooltip("locked ingredient", format!("{with} \u{2265} {PASS_THRESHOLD:.0}% at {BASE_BPM}+ BPM"));
+    }
+}
+
+/// "Sync + P.M." for a mask.
+fn mask_names(m: u8) -> String {
+    INGREDIENTS.iter().filter(|i| m & i.bit != 0).map(|i| i.short).collect::<Vec<_>>().join(" + ")
 }
 
 /// Drill pattern choice (drills). Returns the newly picked drill.
@@ -435,12 +455,77 @@ fn drill_options(g: &Game, p: &mut Paint) -> Option<Level> {
     picked
 }
 
+/// The songs of the selected tempo in two columns: revealed ones by name (a dot until
+/// hovered once), hidden ones as a question mark that shows its requirements on hover.
+fn song_list(g: &mut Game, p: &mut Paint) {
+    let list: Vec<&Song> = songs::at(g.selected.bpm).collect();
+    if list.is_empty() {
+        return;
+    }
+    p.hline(MX, SONGS_Y - 28.0, MR - MX, col::LINE);
+    let col_w = (MR - MX - 40.0) / 2.0;
+    let rows = list.len().div_ceil(2);
+    for (i, s) in list.into_iter().enumerate() {
+        let (x, y) = (MX + (i / rows) as f32 * (col_w + 40.0), SONGS_Y + (i % rows) as f32 * SONG_ROW_H);
+        let cy = y + SONG_ROW_H / 2.0;
+        let (mx, tx) = (x + 14.0, x + 40.0);
+        let hov = p.hover(x, y, col_w, SONG_ROW_H);
+        let revealed = s.revealed(&g.progress);
+        let req = requirement(s);
+        if revealed {
+            p.ring(mx, cy, 14.0, col::FAINT);
+            note(p, mx, cy, col::DIM);
+            let has_part = !s.part.is_empty();
+            let ty = if has_part { cy - 9.0 } else { cy - 1.0 };
+            let tw = col_w - 50.0;
+            p.styled(tx, ty, fit(&s.label(), tw, 16.0), 16.0, col::TEXT, Align::Left, Font::SansMedium, 0.0);
+            if has_part {
+                p.text(tx, cy + 11.0, fit(s.part, tw, 13.0), 13.0, col::DIM, Align::Left);
+            }
+            let key = s.key();
+            if !g.progress.songs_shown.contains(&key) {
+                if hov {
+                    g.progress.songs_shown.insert(key);
+                    g.progress.save();
+                } else {
+                    p.disc(mx + 11.0, cy - 11.0, 4.0, col::OCHRE);
+                }
+            }
+        } else {
+            p.ring(mx, cy, 14.0, if hov { col::OCHRE } else { col::FAINT });
+            p.serif(mx, cy - 2.0, "?", 20.0, if hov { col::OCHRE } else { col::DIM }, Align::Center);
+        }
+        if !revealed {
+            p.text(tx, cy - 1.0, fit(&req, col_w - 50.0, 14.0), 14.0, col::FAINT, Align::Left);
+        } else if hov {
+            p.tooltip(s.key(), req);
+        }
+    }
+}
+
+/// What reveals a song: "P.M. + 16ths ≥ 75%", "any mix ≥ 60%" or "Gallop drill ≥ 90%".
+fn requirement(s: &Song) -> String {
+    let what = match s.via {
+        Via::Run(0) => "any mix".into(),
+        Via::Run(m) => mask_names(m),
+        Via::Drill(id) => PATTERNS.iter().find(|q| q.id == id).map_or_else(|| id.to_string(), |q| format!("{} drill", q.name)),
+    };
+    format!("{what} \u{2265} {:.0}%", s.min)
+}
+
 /// A tick inside a 22 px box at (x, y).
 fn tick(p: &mut Paint, x: f32, y: f32, c: Color) {
     for o in [-0.7f32, 0.0, 0.7] {
         p.line(x + 6.0, y + 11.5 + o, x + 9.5, y + 15.0 + o, c);
         p.line(x + 9.5, y + 15.0 + o, x + 16.0, y + 7.5 + o, c);
     }
+}
+
+/// An eighth note centred at (cx, cy).
+fn note(p: &mut Paint, cx: f32, cy: f32, c: Color) {
+    p.ellipse(cx - 2.5, cy + 5.0, 9.0, 6.5, 0.45, c);
+    p.rect(cx + 1.2, cy - 8.0, 1.6, 13.0, c);
+    p.rot_rect(cx + 4.6, cy - 5.5, 1.6, 7.0, 0.6, c);
 }
 
 /// A small padlock centred at (cx, cy).

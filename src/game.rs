@@ -66,8 +66,6 @@ pub struct ResultsState {
     pub difficulty_note: Option<String>,
     pub listening: Option<usize>,
     pub calibration: bool,
-    /// A song to try, suggested for the first time by this pass.
-    pub song: Option<&'static crate::songs::Song>,
     /// XP this run earned (None for calibration and saved runs).
     pub xp: Option<u32>,
     /// Height of the results page as last drawn (design px).
@@ -376,7 +374,6 @@ impl Game {
         let prev_best = self.progress.best_entry(&key).cloned();
         let difficulty = run.avg_difficulty();
         let mut newly = Vec::new();
-        let mut song = None;
         let mut xp = None;
         if play.calibration {
             if rep.n_matched >= 6 {
@@ -385,9 +382,6 @@ impl Game {
             }
         } else {
             newly = self.progress.record(&run.level, rep.combined_pct);
-            if rep.combined_pct >= crate::progress::PASS_THRESHOLD {
-                song = crate::songs::suggest(&mut self.progress, &run.level);
-            }
             self.progress.history.push(HistoryEntry {
                 key: key.clone(),
                 date: chrono::Local::now().format("%Y-%m-%d %H:%M").to_string(),
@@ -420,7 +414,6 @@ impl Game {
             prev_best,
             listening: None,
             calibration: play.calibration,
-            song,
             xp,
             content_h: None,
         });
@@ -451,7 +444,6 @@ impl Game {
             difficulty_note: None,
             listening: None,
             calibration: false,
-            song: None,
             xp: None,
             content_h: None,
         });

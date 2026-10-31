@@ -1,130 +1,174 @@
-//! Song suggestions: real songs to try once a milestone is passed. Light inspiration, not
-//! a promise that the player can now play them (tempos and tunings differ).
+//! Songs and riffs to try, a list per rung of the tempo ladder. Light inspiration, not a
+//! promise that the player can now play them (tempos and tunings differ).
 //!
-//! An entry is reached by passing a run at `min_bpm` or faster whose ingredients include
-//! `needs`; the quarters and alternate-eighths drills count for the basic entries, and
-//! gallop entries are reached by passing the gallop drill at `min_bpm` or faster. Each suggestion is shown once on the results screen (remembered in
-//! `Progress::songs_shown`); the main screen lists every reached one.
+//! Every entry is hidden until a single run at exactly its tempo reaches its minimum score:
+//! a run whose ingredients include `needs`, or the named drill. Bests are kept per level, so
+//! this reads straight off `Progress::best` (no cumulative scoring). Entries revealed but
+//! not yet looked at are marked on the main screen (`Progress::songs_shown` holds the
+//! looked-at ones).
+//!
+//! Most tempos come from memory; check them before relying on them.
 
 use crate::patterns::{LH, Level, LevelKind, PATTERNS, PM, S16, SYNC, TREM};
 use crate::progress::Progress;
 
+/// What reveals an entry.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Via {
+    /// A run with at least these ingredients (bit mask; 0 = any run).
+    Run(u8),
+    /// The drill of this pattern id.
+    Drill(&'static str),
+}
+
 pub struct Song {
     pub artist: &'static str,
     pub title: &'static str,
-    /// Ingredients the run must have had (bit mask; 0 = basic).
-    pub needs: u8,
-    /// Reached through the gallop drill instead of a run.
-    pub gallop: bool,
-    pub min_bpm: u32,
-    /// A short hint, or empty.
-    pub advice: &'static str,
+    /// Which part to play ("the main riff"), or empty.
+    pub part: &'static str,
+    /// The ladder rung.
+    pub bpm: u32,
+    pub via: Via,
+    /// Minimum combined score of that one run.
+    pub min: f64,
 }
 
-const fn song(artist: &'static str, title: &'static str, needs: u8, min_bpm: u32, advice: &'static str) -> Song {
-    Song { artist, title, needs, gallop: false, min_bpm, advice }
+const B: f64 = 60.0;
+const A: f64 = 75.0;
+const S: f64 = 90.0;
+
+const fn run(bpm: u32, artist: &'static str, title: &'static str, part: &'static str, needs: u8, min: f64) -> Song {
+    Song { artist, title, part, bpm, via: Via::Run(needs), min }
 }
 
-const fn gallop(artist: &'static str, title: &'static str, min_bpm: u32, advice: &'static str) -> Song {
-    Song { artist, title, needs: S16, gallop: true, min_bpm, advice }
+const fn drill(bpm: u32, artist: &'static str, title: &'static str, part: &'static str, id: &'static str, min: f64) -> Song {
+    Song { artist, title, part, bpm, via: Via::Drill(id), min }
 }
 
-/// In order of suggestion within each milestone.
 pub const SONGS: &[Song] = &[
-    // Basic quarters, slow.
-    song("Sleep", "Dragonaut", 0, 80, ""),
-    song("Electric Wizard", "Funeralopolis", 0, 80, "the opening"),
-    song("Gojira", "The Chant", 0, 80, ""),
-    // Basic eighths.
-    song("Deftones", "My Own Summer (Shove It)", 0, 100, ""),
-    song("Ghost", "Square Hammer", 0, 100, ""),
-    song("Amon Amarth", "Guardians of Asgaard", 0, 100, ""),
-    // Syncopation.
-    song("Rammstein", "Du Hast", SYNC, 80, ""),
-    song("Rammstein", "Sonne", SYNC, 80, ""),
-    song("Spiritbox", "Holy Roller", SYNC, 80, ""),
-    song("Knocked Loose", "Counting Worms", SYNC, 80, ""),
-    // Palm mutes.
-    song("Architects", "Animals", PM, 80, ""),
-    song("Sabaton", "Primo Victoria", PM, 80, ""),
-    song("Power Trip", "Executioner's Tax (Swing of the Axe)", PM, 80, ""),
-    // Gallop drill.
-    gallop("Powerwolf", "Army of the Night", 100, "or any Powerwolf song"),
-    gallop("Amon Amarth", "The Pursuit of Vikings", 140, ""),
-    // Note changes, tremolo.
-    song("Mastodon", "Oblivion", LH, 80, "the verse"),
-    song("Alcest", "Autre Temps", TREM, 80, ""),
+    // 40: doom, or 16ths in half time.
+    run(40, "Electric Wizard", "Funeralopolis", "the opening", LH, B),
+    run(40, "Sleep", "Dopesmoker", "the opening riff", LH, B),
+    run(40, "Knocked Loose", "Counting Worms", "the closing breakdown", PM | S16 | SYNC, A),
+    // 60
+    drill(60, "Black Sabbath", "Black Sabbath", "the main riff", "quarters", B),
+    run(60, "Sleep", "Dragonaut", "the main riff", 0, B),
+    run(60, "Metallica", "The Thing That Should Not Be", "the main riff", PM | S16 | LH, A),
+    // 80
+    run(80, "Black Sabbath", "Iron Man", "the main riff", LH, B),
+    drill(80, "Gojira", "The Chant", "", "alt_eighths", B),
+    run(80, "Mastodon", "Oblivion", "the verse", LH, B),
+    run(80, "Power Trip", "Executioner's Tax (Swing of the Axe)", "the breakdown", PM, B),
+    run(80, "Alcest", "Autre Temps", "", S16 | TREM, B),
+    run(80, "Spiritbox", "Holy Roller", "the main riff", SYNC | PM, A),
+    run(80, "Metallica", "Sad But True", "the main riff", PM | S16 | LH, A),
+    // 100
+    drill(100, "Deftones", "My Own Summer (Shove It)", "the main riff", "alt_eighths", B),
+    run(100, "Amon Amarth", "Guardians of Asgaard", "", PM | LH, B),
+    run(100, "AC/DC", "Back in Black", "the chord riff", SYNC | LH, A),
+    run(100, "Architects", "Animals", "the main riff", PM | SYNC, A),
+    run(100, "Sepultura", "Roots Bloody Roots", "the main riff", PM | SYNC | LH, A),
+    // 120
+    run(120, "Rammstein", "Sonne", "the main riff", PM | SYNC, B),
+    run(120, "Sabaton", "Primo Victoria", "the verse", PM | LH, B),
+    run(120, "Dick Dale", "Misirlou", "at two thirds speed", S16 | TREM | LH, B),
+    run(120, "Metallica", "Enter Sandman", "the main riff", PM | LH, A),
+    run(120, "Rammstein", "Du Hast", "the main riff", PM | SYNC, A),
+    run(120, "Meshuggah", "Bleed", "the main riff", PM | S16 | SYNC, S),
+    // 140
+    run(140, "Ghost", "Square Hammer", "the verse", LH, B),
+    run(140, "Megadeth", "Symphony of Destruction", "the main riff", PM | LH, B),
+    run(140, "Metallica", "Seek & Destroy", "the main riff", PM | SYNC | LH, A),
+    drill(140, "Amon Amarth", "The Pursuit of Vikings", "the main riff", "gallop", A),
+    // 160
+    run(160, "Black Sabbath", "Paranoid", "the main riff", PM | LH, B),
+    drill(160, "Powerwolf", "Army of the Night", "or any Powerwolf song", "gallop", B),
+    drill(160, "Iron Maiden", "The Trooper", "the gallop", "gallop", A),
+    run(160, "Amon Amarth", "Twilight of the Thunder God", "the main riff", PM | S16 | LH, A),
+    run(160, "Mg\u{142}a", "Exercises in Futility V", "the tremolo riff", S16 | TREM | LH, A),
+    // 180
+    drill(180, "Iron Maiden", "Run to the Hills", "the verse gallop", "gallop", A),
+    run(180, "Power Trip", "Executioner's Tax (Swing of the Axe)", "the main riff", PM | SYNC | LH, A),
+    run(180, "Dick Dale", "Misirlou", "the main melody", S16 | TREM | LH, S),
+    run(180, "Slayer", "Raining Blood", "the main riff", PM | S16 | LH, S),
 ];
 
 impl Song {
-    /// "Artist – Title", also the key in `Progress::songs_shown`.
+    /// "Artist – Title".
     pub fn label(&self) -> String {
         format!("{} \u{2013} {}", self.artist, self.title)
     }
 
-    /// Does passing `level` reach this entry?
-    pub fn reached_by(&self, level: &Level) -> bool {
-        if level.bpm < self.min_bpm {
+    /// Unique key (in `Progress::songs_shown`).
+    pub fn key(&self) -> String {
+        format!("{}@{} {}", self.label(), self.bpm, self.part)
+    }
+
+    /// Does `level` count for this entry (score aside)?
+    pub fn counts(&self, level: &Level) -> bool {
+        if level.bpm != self.bpm {
             return false;
         }
-        match level.kind {
-            LevelKind::Drill(p) => match PATTERNS[p].id.as_ref() {
-                "gallop" => self.gallop,
-                "quarters" | "alt_eighths" => !self.gallop && self.needs == 0,
-                _ => false,
-            },
-            LevelKind::Run(m) => !self.gallop && m & self.needs == self.needs,
+        match (self.via, level.kind) {
+            (Via::Run(needs), LevelKind::Run(m)) => m & needs == needs,
+            (Via::Drill(id), LevelKind::Drill(p)) => PATTERNS.get(p).is_some_and(|q| q.id == id),
+            _ => false,
         }
+    }
+
+    /// Revealed by a single run in the bests?
+    pub fn revealed(&self, progress: &Progress) -> bool {
+        progress.best.iter().any(|(k, &v)| v >= self.min && Level::from_key(k).is_some_and(|l| self.counts(&l)))
     }
 }
 
-/// Every entry reached by a passed level, in table order.
-#[cfg(test)]
-pub fn reached(progress: &Progress) -> Vec<&'static Song> {
-    let passed: Vec<Level> = progress
-        .best
-        .iter()
-        .filter(|(_, v)| **v >= crate::progress::PASS_THRESHOLD)
-        .filter_map(|(k, _)| Level::from_key(k))
-        .collect();
-    SONGS.iter().filter(|s| passed.iter().any(|l| s.reached_by(l))).collect()
-}
-
-/// After a pass of `level`: the first entry it reaches that hasn't been suggested yet,
-/// marked as shown. One per pass, so suggestions arrive one at a time.
-pub fn suggest(progress: &mut Progress, level: &Level) -> Option<&'static Song> {
-    let s = SONGS.iter().find(|s| s.reached_by(level) && !progress.songs_shown.contains(&s.label()))?;
-    progress.songs_shown.insert(s.label());
-    Some(s)
+/// The entries of one ladder rung, in table order.
+pub fn at(bpm: u32) -> impl Iterator<Item = &'static Song> {
+    SONGS.iter().filter(move |s| s.bpm == bpm)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::patterns::{bpm_steps, drills};
+    use crate::progress::PASS_THRESHOLD;
 
     #[test]
-    fn milestones_and_once_only() {
+    fn table_is_sound() {
+        let rungs: Vec<u32> = bpm_steps().collect();
+        let mut keys = std::collections::HashSet::new();
+        for s in SONGS {
+            assert!(rungs.contains(&s.bpm), "{} not on the ladder", s.key());
+            assert!(s.min >= PASS_THRESHOLD, "{}", s.key());
+            assert!(keys.insert(s.key()), "duplicate {}", s.key());
+            match s.via {
+                Via::Run(m) => assert!(m & TREM == 0 || m & S16 != 0, "tremolo needs 16ths: {}", s.key()),
+                Via::Drill(id) => assert!(drills().iter().any(|&p| PATTERNS[p].id == id), "no drill {id}"),
+            }
+        }
+        for b in rungs {
+            assert!(at(b).count() >= 2, "{b} BPM has too few entries");
+        }
+    }
+
+    #[test]
+    fn one_run_at_exactly_the_tempo() {
+        let iron_man = SONGS.iter().find(|s| s.title == "Iron Man").unwrap();
         let mut p = Progress::default();
-        let basic80 = Level::run(0, 80);
-        assert_eq!(suggest(&mut p, &basic80).map(|s| s.title), Some("Dragonaut"));
-        assert_eq!(suggest(&mut p, &basic80).map(|s| s.title), Some("Funeralopolis"));
-        assert_eq!(suggest(&mut p, &basic80).map(|s| s.title), Some("The Chant"));
-        assert!(suggest(&mut p, &basic80).is_none(), "each appears once");
-        // A palm-mute run at 100 also reaches the basic eighths entries first.
-        assert_eq!(suggest(&mut p, &Level::run(PM | SYNC, 100)).map(|s| s.title), Some("My Own Summer (Shove It)"));
-        // The gallop drill reaches gallop entries; the quarters and alternate-eighths drills
-        // count for basic ones only.
-        let idx = |id: &str| PATTERNS.iter().position(|q| q.id == id).unwrap();
-        assert_eq!(suggest(&mut p, &Level::drill(idx("quarters"), 100)).map(|s| s.title), Some("Square Hammer"));
-        assert_eq!(suggest(&mut p, &Level::drill(idx("alt_eighths"), 180)).map(|s| s.title), Some("Guardians of Asgaard"));
-        assert!(suggest(&mut p, &Level::drill(idx("quarters"), 180)).is_none(), "basic entries used up");
-        assert!(suggest(&mut p, &Level::drill(idx("gallop"), 80)).is_none(), "too slow");
-        assert_eq!(suggest(&mut p, &Level::drill(idx("gallop"), 140)).map(|s| s.artist), Some("Powerwolf"));
-        assert_eq!(suggest(&mut p, &Level::drill(idx("gallop"), 140)).map(|s| s.title), Some("The Pursuit of Vikings"));
-        // Reached list from the bests.
-        p.best.insert("mix:sync@80".into(), 70.0);
-        p.best.insert("mix:pm@80".into(), 40.0);
-        let r: Vec<&str> = reached(&p).iter().map(|s| s.title).collect();
-        assert!(r.contains(&"Dragonaut") && r.contains(&"Du Hast") && !r.contains(&"Animals"), "{r:?}");
+        // Wrong tempo, too low a score, missing ingredient: still hidden.
+        p.best.insert(Level::run(LH, 100).key(), 95.0);
+        p.best.insert(Level::run(LH, 80).key(), 55.0);
+        p.best.insert(Level::run(PM, 80).key(), 95.0);
+        assert!(!iron_man.revealed(&p));
+        // A superset of the needed ingredients at that tempo counts.
+        p.best.insert(Level::run(LH | PM, 80).key(), 61.0);
+        assert!(iron_man.revealed(&p));
+        // Drills reveal their own entries only.
+        let trooper = SONGS.iter().find(|s| s.title == "The Trooper").unwrap();
+        let gallop = PATTERNS.iter().position(|q| q.id == "gallop").unwrap();
+        p.best.insert(Level::run(PM | S16 | LH, 160).key(), 99.0);
+        assert!(!trooper.revealed(&p));
+        p.best.insert(Level::drill(gallop, 160).key(), 80.0);
+        assert!(trooper.revealed(&p));
     }
 }

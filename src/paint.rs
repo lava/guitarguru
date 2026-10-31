@@ -8,7 +8,8 @@
 //! Cormorant Garamond for display and numbers, Mukta for text.
 
 use bevy::asset::RenderAssetUsages;
-use bevy::camera::ScalingMode;
+use bevy::camera::visibility::RenderLayers;
+use bevy::camera::{ClearColorConfig, ScalingMode};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::sprite::Anchor;
@@ -72,6 +73,7 @@ struct ShapeCmd {
     rot: f32,
     /// Pivot within the sprite, -0.5..0.5 (x right, y up).
     anchor: Vec2,
+    overlay: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -100,6 +102,7 @@ struct TextCmd {
     align: Align,
     font: Font,
     spacing: f32,
+    overlay: bool,
 }
 
 enum LineCmd {
@@ -121,7 +124,16 @@ pub struct Paint {
     pub offset_y: f32,
     /// Alpha multiplier for everything (screen fades).
     pub fade: f32,
+    /// Draw on the overlay camera, above everything including ink lines (tooltips).
+    overlay: bool,
+    /// The tooltip asked for this frame: (target id, text).
+    tip: Option<(String, String)>,
+    /// The tooltip target under the cursor, and since when.
+    tip_since: Option<(String, std::time::Instant)>,
 }
+
+/// How long the cursor rests on a target before its tooltip shows.
+const TIP_DELAY: f32 = 0.8;
 
 impl Default for Paint {
     fn default() -> Self {
@@ -135,6 +147,9 @@ impl Default for Paint {
             scroll: 0.0,
             offset_y: 0.0,
             fade: 1.0,
+            overlay: false,
+            tip: None,
+            tip_since: None,
         }
     }
 }
@@ -160,11 +175,13 @@ struct Fonts {
 struct PoolSprite;
 #[derive(Component)]
 struct PoolText;
+#[derive(Component)]
+struct OverlayCam;
 
 impl Paint {
     fn push(&mut self, tex: Tex, center: Vec2, size: Vec2, color: Color, rot: f32, anchor: Vec2) {
         let center = Vec2::new(center.x, center.y + self.offset_y);
-        self.shapes.push(ShapeCmd { tex, center, size, color, rot, anchor });
+        self.shapes.push(ShapeCmd { tex, center, size, color, rot, anchor, overlay: self.overlay });
     }
     pub fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: Color) {
         self.push(Tex::Shape(Shape::Rect), Vec2::new(x + w / 2.0, y + h / 2.0), Vec2::new(w, h), color, 0.0, Vec2::ZERO);
@@ -284,7 +301,7 @@ impl Paint {
     #[allow(clippy::too_many_arguments)]
     pub fn styled(&mut self, x: f32, y: f32, s: impl Into<String>, size: f32, color: Color, align: Align, font: Font, spacing: f32) {
         let pos = Vec2::new(x, y + self.offset_y);
-        self.texts.push(TextCmd { text: s.into(), pos, size, color, align, font, spacing });
+        self.texts.push(TextCmd { text: s.into(), pos, size, color, align, font, spacing, overlay: self.overlay });
     }
     /// Small uppercase letter-spaced label.
     pub fn label(&mut self, x: f32, y: f32, s: &str) {
@@ -292,6 +309,42 @@ impl Paint {
     }
     pub fn label_at(&mut self, x: f32, y: f32, s: &str, align: Align, color: Color) {
         self.styled(x, y, s.to_uppercase(), 11.0, color, align, Font::SansBold, 1.6);
+    }
+    /// Show `text` at the cursor once it has rested on target `id` for a moment. Call it
+    /// every frame the target is hovered.
+    pub fn tooltip(&mut self, id: impl Into<String>, text: impl Into<String>) {
+        self.tip = Some((id.into(), text.into()));
+    }
+    fn draw_tooltip(&mut self) {
+        let req = self.tip.take();
+        let (Some((id, text)), Some(c)) = (req, self.cursor) else {
+            self.tip_since = None;
+            return;
+        };
+        match &self.tip_since {
+            Some((cur, t)) if *cur == id => {
+                if t.elapsed().as_secs_f32() < TIP_DELAY {
+                    return;
+                }
+            }
+            _ => {
+                self.tip_since = Some((id, std::time::Instant::now()));
+                return;
+            }
+        }
+        let (w, h) = (text.chars().count() as f32 * 6.4 + 24.0, 30.0);
+        let x = (c.x + 12.0).min(W - w - 8.0);
+        let y = if c.y + 22.0 + h > H - 8.0 { c.y - 10.0 - h } else { c.y + 22.0 };
+        let off = std::mem::take(&mut self.offset_y);
+        self.overlay = true;
+        self.rect(x, y, w, h, col::TEXT);
+        self.text(x + 12.0, y + h / 2.0 - 1.0, text, 14.0, col::BG, Align::Left);
+        self.overlay = false;
+        self.offset_y = off;
+    }
+    /// Ellipse centred at (cx, cy), rotated by `rot` radians.
+    pub fn ellipse(&mut self, cx: f32, cy: f32, w: f32, h: f32, rot: f32, color: Color) {
+        self.push(Tex::Shape(Shape::Disc), Vec2::new(cx, cy), Vec2::new(w, h), color, rot, Vec2::ZERO);
     }
     /// Is the cursor over this (scrolled) rectangle?
     pub fn hover(&self, x: f32, y: f32, w: f32, h: f32) -> bool {
@@ -447,6 +500,18 @@ fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>, assets: Res<
             ..OrthographicProjection::default_2d()
         }),
     ));
+    // Tooltips: a second camera on layer 1, drawn after the main one (and its gizmos).
+    commands.spawn((
+        Camera2d,
+        Camera { order: 1, clear_color: ClearColorConfig::None, ..default() },
+        Msaa::Off,
+        Projection::Orthographic(OrthographicProjection {
+            scaling_mode: ScalingMode::AutoMin { min_width: W, min_height: H },
+            ..OrthographicProjection::default_2d()
+        }),
+        RenderLayers::layer(1),
+        OverlayCam,
+    ));
     let (cfg, _) = gizmo_cfg.config_mut::<DefaultGizmoConfigGroup>();
     cfg.line.width = 2.4;
     let disc = images.add(shape_image(128, |u, v| {
@@ -476,7 +541,7 @@ fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>, assets: Res<
 fn begin_frame(
     mut paint: ResMut<Paint>,
     windows: Query<&Window, With<PrimaryWindow>>,
-    cams: Query<(&Camera, &GlobalTransform)>,
+    cams: Query<(&Camera, &GlobalTransform), Without<OverlayCam>>,
     mouse: Res<ButtonInput<MouseButton>>,
     mut wheel: MessageReader<bevy::input::mouse::MouseWheel>,
 ) {
@@ -510,6 +575,7 @@ fn begin_frame(
                 color: Color::WHITE,
                 rot: 0.0,
                 anchor: Vec2::ZERO,
+                overlay: false,
             });
         }
     }
@@ -537,18 +603,19 @@ fn flush(
     mut paint: ResMut<Paint>,
     images: Res<ShapeImages>,
     fonts: Res<Fonts>,
-    mut sprites: Query<(&mut Sprite, &mut Transform, &mut Visibility, &mut Anchor), (With<PoolSprite>, Without<PoolText>)>,
+    mut sprites: Query<(&mut Sprite, &mut Transform, &mut Visibility, &mut Anchor, &mut RenderLayers), (With<PoolSprite>, Without<PoolText>)>,
     mut texts: Query<
-        (&mut Text2d, &mut TextFont, &mut TextColor, &mut Anchor, &mut Transform, &mut LetterSpacing),
+        (&mut Text2d, &mut TextFont, &mut TextColor, &mut Anchor, &mut Transform, &mut LetterSpacing, &mut RenderLayers),
         (With<PoolText>, Without<PoolSprite>),
     >,
     mut gizmos: Gizmos,
 ) {
     let paint = &mut *paint;
+    paint.draw_tooltip();
     let k = paint.fade.clamp(0.0, 1.0);
     let mut it = sprites.iter_mut();
     for (i, s) in paint.shapes.iter().enumerate() {
-        let z = i as f32 * 0.0005;
+        let z = i as f32 * 0.0005 + if s.overlay { 20.0 } else { 0.0 };
         let image = match &s.tex {
             Tex::Shape(Shape::Rect) => Handle::default(),
             Tex::Shape(Shape::Disc) => images.disc.clone(),
@@ -558,10 +625,14 @@ fn flush(
             Tex::Image(h) => h.clone(),
         };
         let pos = to_world(s.center).extend(z);
+        let layers = RenderLayers::layer(usize::from(s.overlay));
         let anchor = Anchor(s.anchor);
         let color = if matches!(s.tex, Tex::Shape(Shape::Grain)) { s.color } else { faded(s.color, k) };
         match it.next() {
-            Some((mut sp, mut tf, mut vis, mut anc)) => {
+            Some((mut sp, mut tf, mut vis, mut anc, mut layer)) => {
+                if *layer != layers {
+                    *layer = layers;
+                }
                 if sp.image != image {
                     sp.image = image;
                 }
@@ -578,11 +649,11 @@ fn flush(
                 let mut sp = Sprite::from_color(color, s.size);
                 sp.image = image;
                 let tf = Transform::from_translation(pos).with_rotation(Quat::from_rotation_z(s.rot));
-                commands.spawn((sp, tf, anchor, Visibility::Visible, PoolSprite));
+                commands.spawn((sp, tf, anchor, Visibility::Visible, layers, PoolSprite));
             }
         }
     }
-    for (_, _, mut vis, _) in it {
+    for (_, _, mut vis, _, _) in it {
         if *vis != Visibility::Hidden {
             *vis = Visibility::Hidden;
         }
@@ -601,11 +672,15 @@ fn flush(
             Font::SansMedium => (&fonts.sans_medium, FontWeight(500), FontStyle::Normal),
             Font::SansBold => (&fonts.sans_bold, FontWeight(600), FontStyle::Normal),
         };
-        let pos = to_world(t.pos).extend(10.0);
+        let pos = to_world(t.pos).extend(if t.overlay { 30.0 } else { 10.0 });
+        let layers = RenderLayers::layer(usize::from(t.overlay));
         let color = faded(t.color, k);
         let spacing = LetterSpacing::Px(t.spacing);
         match it.next() {
-            Some((mut tx, mut font, mut tc, mut anc, mut tf, mut ls)) => {
+            Some((mut tx, mut font, mut tc, mut anc, mut tf, mut ls, mut layer)) => {
+                if *layer != layers {
+                    *layer = layers;
+                }
                 if tx.0 != t.text {
                     tx.0.clone_from(&t.text);
                 }
@@ -628,13 +703,13 @@ fn flush(
             }
             None => {
                 let font = make_font(handle, t.size, weight, style);
-                commands.spawn((Text2d::new(t.text.clone()), font, TextColor(color), anchor, Transform::from_translation(pos), spacing, PoolText));
+                commands.spawn((Text2d::new(t.text.clone()), font, TextColor(color), anchor, Transform::from_translation(pos), spacing, layers, PoolText));
             }
         }
     }
     // Unused texts are blanked rather than hidden: a hidden Text2d does not pick up
     // content changes when it is shown again.
-    for (mut tx, _, _, _, _, _) in it {
+    for (mut tx, _, _, _, _, _, _) in it {
         if !tx.0.is_empty() {
             tx.0.clear();
         }
