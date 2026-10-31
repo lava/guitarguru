@@ -3,7 +3,7 @@
 //! seconds to `GG_SHOT_DIR` (default `.`), `GG_END_AT=8` ends the run early (scores the
 //! full bars played so far), `GG_LISTEN_AT=10` starts listen-back of the worst section,
 //! `GG_FAKE_OUTPUT=1` replaces only the output with a silent one, `GG_EXIT_AT=12` quits, `GG_SCREEN=settings` opens the settings screen, `GG_SCROLLS=17:700` scrolls to 700 px at 17 s, `GG_CLICKS=3@860:256` clicks at design
-//! (860, 256) at 3 s, `GG_MENU_AT=20` returns to the main menu, `GG_RESULTS=run.json`
+//! (860, 256) at 3 s, `GG_HOVER=860:256` keeps the cursor there, `GG_MENU_AT=20` returns to the main menu, `GG_RESULTS=run.json`
 //! opens the results of a saved run.
 
 use bevy::prelude::*;
@@ -24,6 +24,7 @@ pub struct Auto {
     scrolls: Vec<(f32, f32)>,
     clicks: Vec<(f32, Vec2)>,
     menu_at: Option<f32>,
+    hover: Option<Vec2>,
 }
 
 fn num(name: &str) -> Option<f32> {
@@ -60,6 +61,10 @@ impl Auto {
                 })
                 .unwrap_or_default(),
             menu_at: num("GG_MENU_AT"),
+            hover: std::env::var("GG_HOVER").ok().and_then(|v| {
+                let (x, y) = v.split_once(':')?;
+                Some(Vec2::new(x.parse().ok()?, y.parse().ok()?))
+            }),
         }
     }
 }
@@ -95,6 +100,9 @@ pub fn auto_system(
         if crossed(at) {
             game.scroll = px;
         }
+    }
+    if let Some(pos) = auto.hover {
+        paint.cursor = Some(pos);
     }
     for (at, pos) in auto.clicks.clone() {
         if crossed(at) {
