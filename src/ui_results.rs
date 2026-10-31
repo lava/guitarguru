@@ -379,7 +379,9 @@ fn listen_card(p: &mut Paint, r: &ResultsState, i: usize, w: &Window, x: f32, y:
             p.ring(nx, y + 128.0, 8.0, col::OCHRE);
         }
     }
-    if let Some((pos, _)) = playing {
+    if let Some((pos, _)) = playing
+        && let Some(pos) = pos.checked_sub(run.listen_lead_frames(w))
+    {
         let t = s0 + pos as f64 / f64::from(run.sample_rate);
         let ph = x + ((t - wstart) / six) as f32 * px16;
         if ph >= x && ph <= x + cw {
@@ -577,7 +579,10 @@ fn run_timeline(p: &mut Paint, r: &ResultsState, x: f32, y: f32, playing: Option
             p.rect(xa, dy, xb - xa, 2.0, PASSAGE.with_alpha(if on { 0.9 } else { 0.55 }));
             p.rect(xa, dy + dh - 2.0, xb - xa, 2.0, PASSAGE.with_alpha(if on { 0.9 } else { 0.55 }));
             p.serif((xa + xb) / 2.0, dy - 12.0, format!("{}", k + 1), 18.0, PASSAGE, Align::Center);
-            if on && let Some((pos, _)) = playing {
+            if on
+                && let Some((pos, _)) = playing
+                && let Some(pos) = pos.checked_sub(r.run.listen_lead_frames(w))
+            {
                 let t = r.run.window_span(w).0 + pos as f64 / f64::from(r.run.sample_rate);
                 let ph = xs(t);
                 if ph >= xa && ph <= xb {

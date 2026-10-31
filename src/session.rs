@@ -234,6 +234,17 @@ impl RunData {
     /// (latency and slow wander as tracked by the scorer).
     /// Raw DI (no amp/cab), levelled so attacks sit around -24 dBFS, with the click
     /// (`click_gain`, already boosted by the caller) where the player heard it.
+    /// Frames of count-in that `render_listen` puts before the passage.
+    pub fn listen_lead_frames(&self, w: &Window) -> usize {
+        let sr = f64::from(self.sample_rate);
+        let beat = beat_seconds(self.plan.bpm);
+        let shift = self.grid_offset_s + w.offset_ms / 1e3;
+        let a = ((self.window_span(w).0 + shift) * sr).max(0.0) as usize;
+        let t0 = a as f64 / sr - shift;
+        let to_first_beat = ((t0 / beat - 1e-6).ceil() * beat - t0).max(0.0);
+        ((f64::from(BEATS_PER_BAR) * beat - to_first_beat) * sr).max(0.0) as usize
+    }
+
     pub fn render_listen(&self, w: &Window, click_gain: f32, attack_level_db: f64) -> Vec<f32> {
         let sr = f64::from(self.sample_rate);
         let (s0, s1) = self.window_span(w);
@@ -258,7 +269,14 @@ impl RunData {
                 *v += click_gain * render_click(&plan, (session_t * sr) as u64, sr);
             }
         }
-        out
+        // Lead with a one-bar count-in: four clicks over silence, the fifth beat landing on
+        // the first beat of the passage.
+        let beat = beat_seconds(self.plan.bpm);
+        let lead = self.listen_lead_frames(w);
+        let count_in = ClickPlan { start_frame: 0, frames_per_beat: beat * sr, beats: BEATS_PER_BAR, beats_per_bar: BEATS_PER_BAR };
+        let mut with_lead: Vec<f32> = (0..lead).map(|i| click_gain * render_click(&count_in, i as u64, sr)).collect();
+        with_lead.extend(out);
+        with_lead
     }
 
     pub fn save(&self, rep: &ScoreReport, onsets: &[Onset], worst: &[Window]) -> Result<PathBuf, String> {
@@ -530,7 +548,10 @@ mod tests {
         assert_eq!(run.window_bars(), 2);
         assert!(worst[0].start_bar == 3 || worst[0].start_bar == 4, "{worst:?}");
         let audio = run.render_listen(&worst[0], 0.3, rep.level_median_db);
-        let expect = (4.0 + 0.5 + 0.25) * 48000.0;
+        let lead = run.listen_lead_frames(&worst[0]);
+        // A one-bar count-in (2 s at this tempo), give or take where the window starts.
+        assert!((lead as f64 - 2.0 * 48000.0).abs() < 0.3 * 48000.0, "{lead}");
+        let expect = (4.0 + 0.5 + 0.25) * 48000.0 + lead as f64;
         assert_eq!(worst[0].pattern_id, "gallop"); // 2 bars + 1 beat lead-in + half-beat tail
         assert!((audio.len() as f64 - expect).abs() < 2.0, "{}", audio.len());
     }
