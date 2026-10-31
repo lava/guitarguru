@@ -1,22 +1,34 @@
-//! Main menu ("Guitar Guru" style): the guru keeping time at the chosen tempo, his stage
-//! from XP with a small bar under him that fills after each run, ingredient pills (locked
-//! ones can be picked with an unlock token), a row of BPM circles with unlock lines, the
-//! Play button and a hairline drills list.
+//! Main menu ("Guitar Guru" style). A left rail holds the logo, the guru keeping time at the
+//! chosen tempo (his stage from XP, with a small bar under him that fills after each run),
+//! the mode switch between the tempo ladder and drills, and Setup. The main area shows the
+//! tempo ladder (BPM circles with unlock lines and a grade on every played tempo), the
+//! options of the mode (ingredient checkboxes for runs, where locked ones can be picked with
+//! an unlock token; the drill pattern for drills) and the Play button bottom right.
 
 use bevy::color::Alpha;
 use bevy::input::ButtonInput;
 use bevy::input::keyboard::KeyCode;
+use bevy::prelude::Color;
 
 use crate::game::{Game, Screen};
 use crate::mascot::{self, MascotImages, Mood, STAGE_NAMES};
-use crate::paint::{Align, Font, Paint, col, fit};
+use crate::paint::{Align, Font, H, Paint, W, col, fit};
 use crate::patterns::{BPM_MAX, BPM_MIN, BPM_STEP, INGREDIENTS, Level, LevelKind, PATTERNS, bpm_steps, drills};
-use crate::progress::PASS_THRESHOLD;
+use crate::progress::grade;
 
-const RX: f32 = 653.0;
+const RAIL_W: f32 = 360.0;
+/// Main area, left and right edge.
+const MX: f32 = RAIL_W + 88.0;
+const MR: f32 = W - 88.0;
+const NODE_R: f32 = 40.0;
+const LADDER_Y: f32 = 262.0;
+const OPTIONS_Y: f32 = 412.0;
+const TILE_H: f32 = 48.0;
+const S_FILL: Color = Color::srgb(0xe9 as f32 / 255.0, 0xc8 as f32 / 255.0, 0x77 as f32 / 255.0);
 
 fn node_x(bpm: u32) -> f32 {
-    694.0 + ((bpm - BPM_MIN) / BPM_STEP) as f32 * 83.5
+    let steps = ((BPM_MAX - BPM_MIN) / BPM_STEP).max(1) as f32;
+    MX + NODE_R + ((bpm - BPM_MIN) / BPM_STEP) as f32 * (MR - MX - 2.0 * NODE_R) / steps
 }
 
 /// Header: lotus, title, gold block-print band (main screen) or a hairline.
@@ -63,227 +75,43 @@ pub fn link(p: &mut Paint, x: f32, y: f32, s: &str) -> bool {
     p.clicked && hov
 }
 
-fn ingredient_list(mask: u8) -> String {
-    let names: Vec<String> = INGREDIENTS.iter().filter(|i| mask & i.bit != 0).map(|i| i.name.to_lowercase()).collect();
-    names.join(", ")
-}
-
 pub fn draw(g: &mut Game, p: &mut Paint, keys: &ButtonInput<KeyCode>, imgs: &MascotImages) {
-    header(p, "Guitar Guru", true);
-    if link(p, 1320.0, 56.0, "Setup") {
+    if rail(g, p, imgs) {
         g.refresh_lists();
         g.screen = Screen::Settings;
         return;
     }
 
-    // ---------- the guru (left), a metronome at the selected tempo, his stage from XP
-    let mix = g.mix;
-    let sel_bpm = g.selected.bpm;
-    guru(g, p, imgs, sel_bpm);
+    let kind = g.selected.kind;
+    let title = if matches!(kind, LevelKind::Drill(_)) { "Drills" } else { "Tempo ladder" };
+    p.serif(MX, 118.0, title, 44.0, col::TEXT, Align::Left);
 
-    // ---------- songs to try (reached milestones), under the guru
-    let songs = crate::songs::reached(&g.progress);
-    if !songs.is_empty() {
-        p.label(170.0, 690.0, "songs to try");
-        for (i, s) in songs.iter().rev().take(6).enumerate() {
-            p.text(170.0, 716.0 + i as f32 * 22.0, fit(&s.label(), 420.0, 13.0), 13.0, col::DIM, Align::Left);
-        }
-    }
+    let mut clicked = ladder(g, p, kind);
 
-    // ---------- ingredients
-    p.label(RX, 214.0, "ingredients");
-    let unlocked_mask = g.progress.unlocked_mask();
-    let mut x = RX;
-    let mut hint = None;
-    for (i, ing) in INGREDIENTS.iter().enumerate() {
-        let short = ing.short;
-        let w = 62.0 + short.len() as f32 * 8.4;
-        let (y, h) = (236.0, 42.0);
-        let on = mix & ing.bit != 0;
-        if g.progress.ingredient_unlocked(i) {
-            let hov = p.hover(x, y, w, h);
-            if on {
-                p.rect(x, y, w, h, col::OCHRE_TINT);
-                p.frame(x, y, w, h, 1.0, col::OCHRE);
-                p.disc(x + 24.0, y + h / 2.0, 6.0, col::OCHRE);
-            } else {
-                if hov {
-                    p.rect(x, y, w, h, col::PANEL);
-                }
-                p.frame(x, y, w, h, 1.0, col::TEXT);
-                p.ring(x + 24.0, y + h / 2.0, 6.0, col::TEXT);
+    p.hline(MX, OPTIONS_Y - 32.0, MR - MX, col::LINE);
+    match kind {
+        LevelKind::Run(_) => ingredients(g, p),
+        LevelKind::Drill(_) => {
+            if let Some(d) = drill_options(g, p) {
+                g.selected = d;
             }
-            p.styled(x + 40.0, y + h / 2.0 - 1.0, short, 16.0, col::TEXT, Align::Left, Font::SansMedium, 0.0);
-            if g.progress.fresh.contains(&format!("ingredient:{}", ing.code)) {
-                p.disc(x + w - 6.0, y + 6.0, 4.0, col::OCHRE);
-            }
-            if p.hit(x, y, w, h) {
-                g.mix ^= ing.bit;
-                g.progress.fresh.remove(&format!("ingredient:{}", ing.code));
-                g.selected = Level::run(g.mix, g.selected.bpm);
-            }
-        } else if g.progress.unlock_tokens > 0 {
-            // An unlock to spend: every locked ingredient can be picked.
-            let hov = p.hover(x, y, w, h);
-            if hov {
-                p.rect(x, y, w, h, col::OCHRE_TINT);
-            }
-            p.dashed_frame(x, y, w, h, col::OCHRE);
-            p.dashed_ring(x + 24.0, y + h / 2.0, 6.0, col::OCHRE);
-            p.text(x + 40.0, y + h / 2.0 - 1.0, short, 16.0, col::DIM, Align::Left);
-            p.text(x + w / 2.0, y + h + 14.0, "click to unlock", 11.0, if hov { col::OCHRE } else { col::DIM }, Align::Center);
-            if p.hit(x, y, w, h) && g.progress.unlock_ingredient(i) {
-                g.progress.save();
-                // Straight into the mix, at the selected tempo.
-                g.mix |= ing.bit;
-                g.selected = Level::run(g.mix, g.selected.bpm);
-            }
-        } else {
-            p.dashed_frame(x, y, w, h, col::LINE);
-            p.dashed_ring(x + 24.0, y + h / 2.0, 6.0, col::FAINT);
-            p.text(x + 40.0, y + h / 2.0 - 1.0, short, 16.0, col::FAINT, Align::Left);
-            if hint.is_none() {
-                hint = Some(if unlocked_mask == 0 {
-                    "Pass the basic mix at 80+ BPM to unlock an ingredient of your choice.".to_string()
-                } else {
-                    format!("Pass with {} at 80+ BPM to unlock another ingredient of your choice.", ingredient_list(unlocked_mask))
-                });
-            }
-        }
-        x += w + 10.0;
-    }
-    if let Some(h) = hint {
-        p.text(RX, 296.0, fit(&h, 680.0, 13.0), 13.0, col::DIM, Align::Left);
-    }
-
-    // ---------- tempo row
-    p.label(RX, 352.0, "tempo \u{b7} bpm");
-    let bpms: Vec<u32> = bpm_steps().collect();
-    let r = 26.0;
-    let cy = 402.0;
-    for &b in &bpms {
-        if b + BPM_STEP > BPM_MAX {
-            continue;
-        }
-        let (l, rr) = (Level::run(mix, b), Level::run(mix, b + BPM_STEP));
-        let (x0, x1) = (node_x(b) + r, node_x(b + BPM_STEP) - r);
-        if g.progress.passed(&l) || g.progress.passed(&rr) {
-            p.rect(x0, cy - 0.75, x1 - x0, 1.5, col::ONTIME);
-        } else if g.progress.is_unlocked(&l) && g.progress.is_unlocked(&rr) {
-            p.rect(x0, cy - 0.5, x1 - x0, 1.0, col::LINE);
-        } else {
-            let mut xx = x0 + 2.0;
-            while xx < x1 - 2.0 {
-                p.disc(xx, cy, 0.8, col::LINE);
-                xx += 6.0;
-            }
-        }
-    }
-    let mut clicked: Option<Level> = None;
-    let mut hovered: Option<Level> = None;
-    for &b in &bpms {
-        let l = Level::run(mix, b);
-        let x = node_x(b);
-        let open = g.progress.is_unlocked(&l);
-        let passed = g.progress.passed(&l);
-        let best = g.progress.best(&l);
-        let hov = p.hover_circle(x, cy, r + 3.0);
-        if hov {
-            hovered = Some(l);
-        }
-        if g.selected == l {
-            p.disc(x, cy, r, col::TEXT);
-            p.serif(x, cy - 2.0, format!("{b}"), 22.0, col::BG, Align::Center);
-        } else if passed {
-            p.disc(x, cy, r, col::TEAL_TINT);
-            p.ring(x, cy, r, col::ONTIME);
-            p.serif(x, cy - 2.0, format!("{b}"), 22.0, col::ONTIME, Align::Center);
-        } else if open {
-            if hov {
-                p.disc(x, cy, r, col::PANEL);
-            }
-            p.ring(x, cy, r, col::TEXT);
-            p.serif(x, cy - 2.0, format!("{b}"), 22.0, col::TEXT, Align::Center);
-        } else {
-            p.dashed_ring(x, cy, r, col::LINE);
-            p.serif(x, cy - 2.0, format!("{b}"), 22.0, col::FAINT, Align::Center);
-        }
-        if g.progress.fresh.contains(&format!("tempo:{b}")) {
-            p.disc(x + r * 0.75, cy - r * 0.75, 4.0, col::OCHRE);
-        }
-        let below = if !open {
-            "locked".to_string()
-        } else if let Some(s) = best {
-            format!("{s:.0}%")
-        } else {
-            "open".into()
-        };
-        p.text(x, cy + 42.0, below, 13.0, if passed { col::ONTIME } else { col::DIM }, Align::Center);
-        if hov && p.clicked && open {
-            clicked = Some(l);
         }
     }
 
-    // ---------- play button
+    // ---------- play button, bottom right
     let sel = g.selected;
     let can_play = g.progress.is_unlocked(&sel);
-    let (main, sub) = match sel.kind {
-        LevelKind::Run(m) => {
-            (format!("Play {} BPM", sel.bpm), if m == 0 { "basic".to_string() } else { format!("with {}", ingredient_list(m)) })
-        }
-        LevelKind::Drill(pi) => (format!("Drill {} BPM", sel.bpm), PATTERNS[pi].name.to_string()),
-    };
-    let (bx, by, bh) = (RX, 488.0, 56.0);
-    let main_w = main.len() as f32 * 12.6;
-    let bw = 52.0 + main_w + sub.len() as f32 * 6.8;
+    let (bw, bh) = (200.0, 76.0);
+    let (bx, by) = (MR - bw, H - 64.0 - bh);
     let hov = p.hover(bx, by, bw, bh);
     p.rect(bx, by, bw, bh, if !can_play { col::FAINT } else if hov { col::DIM } else { col::TEXT });
-    p.serif(bx + 26.0, by + bh / 2.0 - 3.0, &main, 28.0, col::BG, Align::Left);
-    p.text(bx + 36.0 + main_w, by + bh / 2.0 + 3.0, &sub, 13.0, col::BG, Align::Left);
+    p.serif(bx + bw / 2.0, by + bh / 2.0 - 3.0, "Play", 36.0, col::BG, Align::Center);
     if can_play && (p.hit(bx, by, bw, bh) || keys.just_pressed(KeyCode::Enter)) {
         g.start_level(sel, false);
         return;
     }
 
-    // ---------- drills (at the selected tempo; locked until their ingredients are)
-    let (dx, dw) = (843.0, 477.0);
-    p.label(dx, 670.0, &format!("drills \u{b7} {} bpm", sel.bpm));
-    let drills = drills();
-    let (row_h, visible) = (40.0, 5usize);
-    let max_first = drills.len().saturating_sub(visible);
-    if p.hover(dx, 686.0, dw, row_h * visible as f32) && p.scroll != 0.0 {
-        let cur = (g.scroll / row_h) as usize;
-        let next = if p.scroll < 0.0 { (cur + 1).min(max_first) } else { cur.saturating_sub(1) };
-        g.scroll = next as f32 * row_h;
-    }
-    let first = ((g.scroll / row_h) as usize).min(max_first);
-    for (k, &pi) in drills.iter().skip(first).take(visible).enumerate() {
-        let d = Level::drill(pi, sel.bpm);
-        let y = 686.0 + k as f32 * row_h;
-        let open = g.progress.is_unlocked(&d);
-        let hov = p.hover(dx, y, dw, row_h);
-        if hov {
-            hovered = Some(d);
-            p.rect(dx, y, dw, row_h - 1.0, col::PANEL);
-        }
-        if g.selected == d {
-            p.rect(dx - 10.0, y + 8.0, 2.0, row_h - 16.0, col::OCHRE);
-        }
-        let c = if open { col::TEXT } else { col::FAINT };
-        p.styled(dx, y + row_h / 2.0, fit(&PATTERNS[pi].name, dw - 150.0, 16.0), 16.0, c, Align::Left, Font::SansMedium, 0.0);
-        p.text(dx + dw - 48.0, y + row_h / 2.0 + 2.0, if open { format!("{} BPM", sel.bpm) } else { "locked".into() }, 12.0, col::DIM, Align::Right);
-        let best = g.progress.best(&d).map_or("\u{2013}".to_string(), |b| format!("{b:.0}"));
-        p.serif(dx + dw, y + row_h / 2.0 - 2.0, best, 22.0, if g.progress.passed(&d) { col::ONTIME } else { col::TEXT }, Align::Right);
-        p.hline(dx, y + row_h - 1.0, dw, col::LINE);
-        if hov && p.clicked && open {
-            clicked = Some(d);
-        }
-    }
-    if drills.len() > visible {
-        p.text(dx + dw, 670.0, format!("{}\u{2013}{} of {} \u{b7} scroll", first + 1, (first + visible).min(drills.len()), drills.len()), 11.0, col::FAINT, Align::Right);
-    }
-
-    if let Some(l) = clicked {
+    if let Some(l) = clicked.take() {
         if g.selected == l {
             g.start_level(l, false);
             return;
@@ -304,21 +132,341 @@ pub fn draw(g: &mut Game, p: &mut Paint, keys: &ButtonInput<KeyCode>, imgs: &Mas
         }
     }
 
-    // ---------- status lines
-    if let Some(l) = hovered
-        && let Some(h) = g.progress.best_entry(&l.key())
-    {
-        let pass = if h.combined >= PASS_THRESHOLD { "passed" } else { "not passed yet" };
-        p.text(RX, 578.0, format!("{} {} BPM \u{b7} best {:.0}% ({pass}) \u{b7} evenness {:.1} ms", l.name(), l.bpm, h.combined, h.spread_ms), 13.0, col::DIM, Align::Left);
-    }
+    // ---------- problems, bottom left
+    let text_w = bx - 40.0 - MX;
     if let Some((msg, bad)) = g.input_problem() {
-        p.text(RX, 604.0, fit(&msg, 560.0, 13.0), 13.0, if bad { col::LATE } else { col::DIM }, Align::Left);
-        if link(p, 1320.0, 604.0, "Retry") {
+        p.text(MX, by + 14.0, fit(&msg, text_w, 13.0), 13.0, if bad { col::LATE } else { col::DIM }, Align::Left);
+        if link(p, MX + 44.0, by + 42.0, "Retry") {
             g.restart_engine();
         }
     }
     if let Some(m) = &g.message {
-        p.text(RX, 620.0, m.clone(), 13.0, col::LATE, Align::Left);
+        p.text(MX, by + 70.0, fit(m, text_w, 13.0), 13.0, col::LATE, Align::Left);
+    }
+}
+
+/// The left rail. Returns true when Setup was clicked.
+fn rail(g: &mut Game, p: &mut Paint, imgs: &MascotImages) -> bool {
+    p.rect(0.0, 0.0, RAIL_W, H, col::PANEL);
+    lotus(p, 58.0, 64.0, 0.85);
+    p.italic(88.0, 58.0, "Guitar Guru", 38.0, col::TEXT, Align::Left);
+
+    let bpm = g.selected.bpm;
+    guru(g, p, imgs, bpm);
+
+    // Mode switch.
+    let drill_mode = matches!(g.selected.kind, LevelKind::Drill(_));
+    let (nx, nw, nh) = (40.0, RAIL_W - 80.0, 48.0);
+    for (k, active) in [(0, !drill_mode), (1, drill_mode)] {
+        let y = 520.0 + k as f32 * (nh + 4.0);
+        let hov = p.hover(nx, y, nw, nh);
+        if active {
+            p.rect(nx, y, nw, nh, col::TEXT);
+        } else if hov {
+            p.rect(nx, y, nw, nh, col::PANEL2);
+        }
+        let c = if active { col::BG } else { col::TEXT };
+        let (ix, cy) = (nx + 26.0, y + nh / 2.0);
+        if k == 0 {
+            for (i, h) in [6.0f32, 10.0, 14.0, 18.0].into_iter().enumerate() {
+                p.rect(ix - 9.0 + i as f32 * 5.5, cy + 9.0 - h, 2.4, h, c);
+            }
+        } else {
+            p.ring(ix, cy, 9.0, c);
+            p.ring(ix, cy, 8.4, c);
+            p.disc(ix, cy, 3.5, c);
+        }
+        p.styled(nx + 50.0, cy - 1.0, if k == 0 { "Tempo ladder" } else { "Drills" }, 16.0, c, Align::Left, Font::SansBold, 0.0);
+        if p.hit(nx, y, nw, nh) && !active {
+            g.selected = if k == 0 { Level::run(g.mix, bpm) } else { first_drill(g, bpm) };
+        }
+    }
+
+    // Setup, at the bottom.
+    let (sx, sy) = (40.0, H - 56.0);
+    let hov = p.hover(sx, sy - 22.0, 120.0, 44.0);
+    let c = if hov { col::OCHRE } else { col::TEXT };
+    gear(p, sx + 9.0, sy, c);
+    p.styled(sx + 28.0, sy - 1.0, "Setup", 15.0, c, Align::Left, Font::SansBold, 0.0);
+    p.clicked && hov
+}
+
+/// The drill to show when switching to drills: the first one open at this tempo.
+fn first_drill(g: &Game, bpm: u32) -> Level {
+    let all = drills();
+    let open = all.iter().map(|&pi| Level::drill(pi, bpm)).find(|d| g.progress.is_unlocked(d));
+    open.unwrap_or_else(|| Level::drill(all.first().copied().unwrap_or(0), bpm))
+}
+
+/// The tempo ladder for levels of `kind`. Returns the clicked (open) level.
+fn ladder(g: &mut Game, p: &mut Paint, kind: LevelKind) -> Option<Level> {
+    let bpms: Vec<u32> = bpm_steps().collect();
+    let (r, cy) = (NODE_R, LADDER_Y);
+    let at = |b: u32| Level { kind, bpm: b };
+    for &b in &bpms {
+        if b + BPM_STEP > BPM_MAX {
+            continue;
+        }
+        let (l, rr) = (at(b), at(b + BPM_STEP));
+        let (x0, x1) = (node_x(b) + r, node_x(b + BPM_STEP) - r);
+        if g.progress.passed(&l) || g.progress.passed(&rr) {
+            p.rect(x0, cy - 0.75, x1 - x0, 1.5, col::ONTIME);
+        } else if g.progress.is_unlocked(&l) && g.progress.is_unlocked(&rr) {
+            p.rect(x0, cy - 0.5, x1 - x0, 1.0, col::LINE);
+        } else {
+            let mut xx = x0 + 2.0;
+            while xx < x1 - 2.0 {
+                p.disc(xx, cy, 0.8, col::LINE);
+                xx += 6.0;
+            }
+        }
+    }
+    let mut clicked = None;
+    for &b in &bpms {
+        let l = at(b);
+        let x = node_x(b);
+        let open = g.progress.is_unlocked(&l);
+        let passed = g.progress.passed(&l);
+        let best = g.progress.best(&l);
+        let hov = p.hover_circle(x, cy, r + 3.0);
+        if g.selected == l {
+            p.disc(x, cy, r, col::TEXT);
+            p.serif(x, cy - 2.0, format!("{b}"), 30.0, col::BG, Align::Center);
+        } else if passed {
+            p.disc(x, cy, r, col::TEAL_TINT);
+            p.ring(x, cy, r, col::ONTIME);
+            p.serif(x, cy - 2.0, format!("{b}"), 30.0, col::ONTIME, Align::Center);
+        } else if open {
+            if hov {
+                p.disc(x, cy, r, col::PANEL);
+            }
+            p.ring(x, cy, r, col::TEXT);
+            p.serif(x, cy - 2.0, format!("{b}"), 30.0, col::TEXT, Align::Center);
+        } else {
+            p.dashed_ring(x, cy, r, col::LINE);
+            p.serif(x, cy - 2.0, format!("{b}"), 30.0, col::FAINT, Align::Center);
+        }
+        if let Some(s) = best {
+            grade_badge(p, x + r * 0.74, cy - r * 0.74, grade(s));
+        }
+        if g.progress.fresh.contains(&format!("tempo:{b}")) {
+            p.disc(x - r * 0.74, cy - r * 0.74, 4.5, col::OCHRE);
+        }
+        let below = if !open {
+            "locked".to_string()
+        } else if let Some(s) = best {
+            format!("{s:.0}%")
+        } else {
+            "open".into()
+        };
+        p.text(x, cy + r + 22.0, below, 14.0, col::DIM, Align::Center);
+        if hov && p.clicked && open {
+            clicked = Some(l);
+        }
+    }
+    clicked
+}
+
+fn grade_badge(p: &mut Paint, cx: f32, cy: f32, g: char) {
+    let (fill, text, edge) = match g {
+        'S' => (S_FILL, col::TEXT, Some(col::GOLD)),
+        'A' => (col::ONTIME, Color::WHITE, None),
+        'B' => (col::TEAL_TINT, col::ONTIME, Some(col::ONTIME)),
+        _ => (col::PANEL2, col::DIM, Some(col::FAINT)),
+    };
+    p.disc(cx, cy, 17.0, col::BG);
+    p.disc(cx, cy, 14.0, fill);
+    if let Some(e) = edge {
+        p.ring(cx, cy, 14.0, e);
+    }
+    p.styled(cx, cy - 1.0, g.to_string(), 14.0, text, Align::Center, Font::SansBold, 0.0);
+}
+
+/// Look of an option tile.
+#[derive(Clone, Copy, PartialEq)]
+enum Tile {
+    On,
+    Off,
+    /// Locked, but an unlock token can open it.
+    Unlockable,
+    Locked,
+}
+
+/// Width of a tile with this label (and a lock icon when locked).
+fn tile_w(label: &str, t: Tile) -> f32 {
+    let lock = if matches!(t, Tile::Unlockable | Tile::Locked) { 24.0 } else { 0.0 };
+    14.0 + 22.0 + 12.0 + label.len() as f32 * 7.2 + lock + 18.0
+}
+
+/// An option tile with a checkbox (`radio` = false) or a radio dot. Returns true when
+/// clicked (any state but plain locked).
+fn tile(p: &mut Paint, x: f32, y: f32, label: &str, t: Tile, radio: bool) -> bool {
+    let (w, h) = (tile_w(label, t), TILE_H);
+    let hov = p.hover(x, y, w, h);
+    let (bx, cy) = (x + 14.0, y + h / 2.0);
+    let label_c = match t {
+        Tile::On => {
+            p.rect(x, y, w, h, col::TEAL_TINT);
+            p.frame(x, y, w, h, 1.5, col::ONTIME);
+            col::ONTIME
+        }
+        Tile::Off => {
+            if hov {
+                p.rect(x, y, w, h, col::PANEL);
+            }
+            p.frame(x, y, w, h, 1.5, col::TEXT);
+            col::TEXT
+        }
+        Tile::Unlockable => {
+            if hov {
+                p.rect(x, y, w, h, col::OCHRE_TINT);
+            }
+            p.dashed_frame(x, y, w, h, col::OCHRE);
+            col::DIM
+        }
+        Tile::Locked => {
+            p.dashed_frame(x, y, w, h, col::LINE);
+            col::FAINT
+        }
+    };
+    // The box (or radio) itself.
+    if radio {
+        let rc = bx + 11.0;
+        match t {
+            Tile::On => {
+                p.disc(rc, cy, 10.0, col::ONTIME);
+                p.disc(rc, cy, 4.0, Color::WHITE);
+            }
+            Tile::Off => {
+                p.disc(rc, cy, 10.0, col::TEXT);
+                p.disc(rc, cy, 8.5, col::BG);
+            }
+            Tile::Unlockable => p.dashed_ring(rc, cy, 10.0, col::OCHRE),
+            Tile::Locked => p.dashed_ring(rc, cy, 10.0, col::LINE),
+        }
+    } else {
+        let (s, by) = (22.0, cy - 11.0);
+        match t {
+            Tile::On => {
+                p.rect(bx, by, s, s, col::ONTIME);
+                tick(p, bx, by, Color::WHITE);
+            }
+            Tile::Off => {
+                p.rect(bx, by, s, s, col::BG);
+                p.frame(bx, by, s, s, 1.5, col::TEXT);
+            }
+            Tile::Unlockable => p.dashed_frame(bx, by, s, s, col::OCHRE),
+            Tile::Locked => p.dashed_frame(bx, by, s, s, col::LINE),
+        }
+    }
+    let font = if t == Tile::On { Font::SansBold } else { Font::SansMedium };
+    p.styled(bx + 34.0, cy - 1.0, label, 16.0, label_c, Align::Left, font, 0.0);
+    if matches!(t, Tile::Unlockable | Tile::Locked) {
+        let c = if t == Tile::Unlockable { col::OCHRE } else { col::FAINT };
+        lock(p, x + w - 26.0, cy, c);
+    }
+    t != Tile::Locked && p.clicked && hov
+}
+
+/// Ingredient checkboxes (runs).
+fn ingredients(g: &mut Game, p: &mut Paint) {
+    let mut x = MX;
+    for (i, ing) in INGREDIENTS.iter().enumerate() {
+        let t = if g.progress.ingredient_unlocked(i) {
+            if g.mix & ing.bit != 0 { Tile::On } else { Tile::Off }
+        } else if g.progress.unlock_tokens > 0 {
+            Tile::Unlockable
+        } else {
+            Tile::Locked
+        };
+        let w = tile_w(ing.short, t);
+        if x + w > MR {
+            break;
+        }
+        let fresh_key = format!("ingredient:{}", ing.code);
+        if tile(p, x, OPTIONS_Y, ing.short, t, false) {
+            match t {
+                Tile::On | Tile::Off => {
+                    g.mix ^= ing.bit;
+                    g.progress.fresh.remove(&fresh_key);
+                }
+                Tile::Unlockable => {
+                    if g.progress.unlock_ingredient(i) {
+                        g.progress.save();
+                        // Straight into the mix, at the selected tempo.
+                        g.mix |= ing.bit;
+                    }
+                }
+                Tile::Locked => {}
+            }
+            g.selected = Level::run(g.mix, g.selected.bpm);
+        }
+        if g.progress.fresh.contains(&fresh_key) {
+            p.disc(x + w - 6.0, OPTIONS_Y + 6.0, 4.0, col::OCHRE);
+        }
+        x += w + 12.0;
+    }
+}
+
+/// Drill pattern choice (drills). Returns the newly picked drill.
+fn drill_options(g: &Game, p: &mut Paint) -> Option<Level> {
+    let bpm = g.selected.bpm;
+    let mut x = MX;
+    let mut picked = None;
+    for pi in drills() {
+        let d = Level::drill(pi, bpm);
+        let name = PATTERNS[pi].name.as_ref();
+        let t = if g.selected == d {
+            Tile::On
+        } else if g.progress.is_unlocked(&d) {
+            Tile::Off
+        } else {
+            Tile::Locked
+        };
+        let w = tile_w(name, t);
+        if x + w > MR {
+            break;
+        }
+        if tile(p, x, OPTIONS_Y, name, t, true) && t == Tile::Off {
+            picked = Some(d);
+        }
+        x += w + 12.0;
+    }
+    picked
+}
+
+/// A tick inside a 22 px box at (x, y).
+fn tick(p: &mut Paint, x: f32, y: f32, c: Color) {
+    for o in [-0.7f32, 0.0, 0.7] {
+        p.line(x + 6.0, y + 11.5 + o, x + 9.5, y + 15.0 + o, c);
+        p.line(x + 9.5, y + 15.0 + o, x + 16.0, y + 7.5 + o, c);
+    }
+}
+
+/// A small padlock centred at (cx, cy).
+fn lock(p: &mut Paint, cx: f32, cy: f32, c: Color) {
+    p.rect(cx - 5.5, cy - 1.0, 11.0, 8.0, c);
+    let (r, top) = (3.4f32, cy - 4.5);
+    for o in [0.0f32, 0.6] {
+        p.line(cx - r - o, cy - 1.0, cx - r - o, top, c);
+        p.line(cx + r + o, cy - 1.0, cx + r + o, top, c);
+        let n = 8;
+        for i in 0..n {
+            let (a0, a1) = (std::f32::consts::PI * i as f32 / n as f32, std::f32::consts::PI * (i + 1) as f32 / n as f32);
+            let rr = r + o;
+            p.line(cx - rr * a0.cos(), top - rr * a0.sin(), cx - rr * a1.cos(), top - rr * a1.sin(), c);
+        }
+    }
+}
+
+/// A small gear centred at (cx, cy).
+fn gear(p: &mut Paint, cx: f32, cy: f32, c: Color) {
+    p.ring(cx, cy, 5.5, c);
+    p.ring(cx, cy, 5.0, c);
+    p.ring(cx, cy, 2.2, c);
+    for k in 0..8 {
+        let a = std::f32::consts::TAU * k as f32 / 8.0;
+        p.rot_rect(cx + 7.0 * a.cos(), cy + 7.0 * a.sin(), 3.2, 2.6, -a, c);
     }
 }
 
@@ -326,7 +474,8 @@ pub fn draw(g: &mut Game, p: &mut Paint, keys: &ButtonInput<KeyCode>, imgs: &Mas
 /// run the bar fills from the XP last shown to the current total; crossing a stage
 /// threshold cross-fades him into the next stage inside a widening gold ring.
 fn guru(g: &mut Game, p: &mut Paint, imgs: &MascotImages, bpm: u32) {
-    let (gx, gy, gs) = (220.0, 196.0, 1.15);
+    let gs = 1.0;
+    let (gx, gy) = ((RAIL_W - 240.0 * gs) / 2.0, 130.0);
     let (from, to) = (g.progress.xp_seen, g.progress.xp);
     let shown = crate::xp::animate(from, to, g.clock - g.screen_since - 0.6);
     if shown.done && from != to {
@@ -344,7 +493,7 @@ fn guru(g: &mut Game, p: &mut Paint, imgs: &MascotImages, bpm: u32) {
                 let v = ((u - delay) / (1.0 - delay)).clamp(0.0, 1.0);
                 if v > 0.0 && v < 1.0 {
                     let a = (1.0 - v) * 0.9;
-                    let r = 110.0 + 120.0 * v;
+                    let r = 100.0 + 70.0 * v;
                     if k == 0 {
                         p.ring(cx, cy, r, col::GOLD.with_alpha(a));
                     } else {
@@ -363,7 +512,7 @@ fn guru(g: &mut Game, p: &mut Paint, imgs: &MascotImages, bpm: u32) {
     }
 
     // The bar: a hairline track between two small gold diamonds, the fill in ochre.
-    let (bx, by, bw) = (cx - 96.0, 512.0, 192.0);
+    let (bx, by, bw) = (54.0, 450.0, RAIL_W - 108.0);
     let full = shown.stage_up.is_some();
     let f = if full { 1.0 } else { crate::xp::fill(shown.xp) as f32 };
     p.rect(bx, by - 0.5, bw, 1.0, col::LINE);

@@ -12,6 +12,19 @@ use crate::patterns::SYNC;
 /// Combined score (percent) needed to pass a level.
 pub const PASS_THRESHOLD: f64 = 60.0;
 
+/// Letter grade of a combined score: C below the pass mark, then B, A and S.
+pub fn grade(score: f64) -> char {
+    if score >= 90.0 {
+        'S'
+    } else if score >= 75.0 {
+        'A'
+    } else if score >= PASS_THRESHOLD {
+        'B'
+    } else {
+        'C'
+    }
+}
+
 pub fn data_dir() -> PathBuf {
     if let Some(d) = std::env::var_os("GG_DATA_DIR") {
         return PathBuf::from(d);
@@ -350,6 +363,15 @@ fn neighbour_tempos(bpm: u32) -> impl Iterator<Item = u32> {
 mod tests {
     use super::*;
     use crate::patterns::PATTERNS;
+
+    #[test]
+    fn grades_start_at_the_pass_mark() {
+        assert_eq!(grade(40.0), 'C');
+        assert_eq!(grade(PASS_THRESHOLD - 0.1), 'C');
+        assert_eq!(grade(PASS_THRESHOLD), 'B');
+        assert_eq!(grade(75.0), 'A');
+        assert_eq!(grade(90.0), 'S');
+    }
 
     #[test]
     fn unlock_rules() {

@@ -7,7 +7,7 @@
 //! `Progress::songs_shown`); the main screen lists every reached one.
 
 use crate::patterns::{LH, Level, LevelKind, PATTERNS, PM, S16, SYNC, TREM};
-use crate::progress::{PASS_THRESHOLD, Progress};
+use crate::progress::Progress;
 
 pub struct Song {
     pub artist: &'static str,
@@ -79,9 +79,14 @@ impl Song {
 }
 
 /// Every entry reached by a passed level, in table order.
+#[cfg(test)]
 pub fn reached(progress: &Progress) -> Vec<&'static Song> {
-    let passed: Vec<Level> =
-        progress.best.iter().filter(|(_, v)| **v >= PASS_THRESHOLD).filter_map(|(k, _)| Level::from_key(k)).collect();
+    let passed: Vec<Level> = progress
+        .best
+        .iter()
+        .filter(|(_, v)| **v >= crate::progress::PASS_THRESHOLD)
+        .filter_map(|(k, _)| Level::from_key(k))
+        .collect();
     SONGS.iter().filter(|s| passed.iter().any(|l| s.reached_by(l))).collect()
 }
 
