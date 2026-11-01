@@ -14,7 +14,7 @@ use bevy::prelude::Color;
 use crate::game::{Game, Screen};
 use crate::mascot::{self, MascotImages, Mood, STAGE_NAMES};
 use crate::paint::{Align, Font, H, Paint, W, col, fit};
-use crate::patterns::{BASE_BPM, BPM_MAX, BPM_MIN, BPM_STEP, INGREDIENTS, Level, LevelKind, PATTERNS, bpm_steps, drills};
+use crate::patterns::{BPM_MAX, BPM_MIN, BPM_STEP, INGREDIENTS, Level, LevelKind, PATTERNS, bpm_steps, drills};
 use crate::progress::{PASS_THRESHOLD, grade};
 use crate::songs::{self, Song, Via};
 
@@ -380,7 +380,7 @@ fn ingredients(g: &mut Game, p: &mut Paint) {
     for (i, ing) in INGREDIENTS.iter().enumerate() {
         let t = if g.progress.ingredient_unlocked(i) {
             if g.mix & ing.bit != 0 { Tile::On } else { Tile::Off }
-        } else if g.progress.unlock_tokens > 0 {
+        } else if g.progress.unlock_tokens() > 0 {
             Tile::Unlockable
         } else {
             Tile::Locked
@@ -415,17 +415,22 @@ fn ingredients(g: &mut Game, p: &mut Paint) {
         }
         x += w + 12.0;
     }
-    // An ingredient unlocks after a pass with all unlocked ones on (`Progress::record`).
+    // The next unlock comes from the first pass with an unlocked ingredient not passed
+    // yet, or from any first pass (`Progress::unlock_tokens`).
     if tip {
-        let m = g.progress.unlocked_mask();
-        let with = if m == 0 { "basic".into() } else { mask_names(m) };
-        p.tooltip("locked ingredient", format!("{with} \u{2265} {PASS_THRESHOLD:.0}% at {BASE_BPM}+ BPM"));
+        let todo = g.progress.unlocked_mask() & !g.progress.passed_mask();
+        let with = if todo == 0 { "any run".into() } else { mask_names_with(todo, " or ") };
+        p.tooltip("locked ingredient", format!("{with} \u{2265} {PASS_THRESHOLD:.0}%"));
     }
 }
 
 /// "Sync + P.M." for a mask.
 fn mask_names(m: u8) -> String {
-    INGREDIENTS.iter().filter(|i| m & i.bit != 0).map(|i| i.short).collect::<Vec<_>>().join(" + ")
+    mask_names_with(m, " + ")
+}
+
+fn mask_names_with(m: u8, sep: &str) -> String {
+    INGREDIENTS.iter().filter(|i| m & i.bit != 0).map(|i| i.short).collect::<Vec<_>>().join(sep)
 }
 
 /// Drill pattern choice (drills). Returns the newly picked drill.

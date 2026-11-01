@@ -55,9 +55,6 @@ pub struct Progress {
     /// Unlocked ingredients (bit mask).
     #[serde(default)]
     pub ingredient_mask: u8,
-    /// Earned ingredient unlocks not yet spent (the player picks which ingredient).
-    #[serde(default)]
-    pub unlock_tokens: u32,
     /// Experience from all finished runs (see `xp`).
     #[serde(default)]
     pub xp: u32,
@@ -282,12 +279,27 @@ impl Progress {
         INGREDIENTS.iter().all(|i| self.ingredient_mask & i.bit != 0)
     }
 
-    /// Spend an unlock token on ingredient `i`. False if there is no token or it is open.
+    /// Ingredients that have been part of a passed run.
+    pub fn passed_mask(&self) -> u8 {
+        self.passed_runs().fold(0, |m, (_, mask)| m | mask)
+    }
+
+    /// Unlocks earned and not yet spent (the player picks which ingredient). The first
+    /// passed run earns one, and so does each ingredient's first passed run, whatever else
+    /// was on and at any tempo; every unlocked ingredient has spent one.
+    pub fn unlock_tokens(&self) -> u32 {
+        if self.all_ingredients() {
+            return 0;
+        }
+        let earned = u32::from(self.passed_runs().next().is_some()) + self.passed_mask().count_ones();
+        earned.saturating_sub(self.ingredient_mask.count_ones())
+    }
+
+    /// Spend an unlock on ingredient `i`. False if there is none or it is open.
     pub fn unlock_ingredient(&mut self, i: usize) -> bool {
-        if self.unlock_tokens == 0 || self.ingredient_unlocked(i) {
+        if self.unlock_tokens() == 0 || self.ingredient_unlocked(i) {
             return false;
         }
-        self.unlock_tokens -= 1;
         self.ingredient_mask |= INGREDIENTS[i].bit;
         self.fresh.insert(format!("ingredient:{}", INGREDIENTS[i].code));
         true
@@ -325,23 +337,21 @@ impl Progress {
     }
 
     /// Record a result. Returns what it opened. Only runs unlock: the tempos +/-20 (for every
-    /// unlocked ingredient set), and an unlock token (an ingredient of the player's
-    /// choice) when the run had all unlocked ingredients active at >= 80 BPM. At most one
-    /// token is pending at a time, so the next one again needs a pass with all of them.
+    /// unlocked ingredient set), and an ingredient of the player's choice (see
+    /// `unlock_tokens`).
     pub fn record(&mut self, level: &Level, combined: f64) -> Vec<Unlock> {
         let before: Vec<u32> = neighbour_tempos(level.bpm).filter(|&b| self.tempo_reached(b)).collect();
+        let tokens = self.unlock_tokens();
         let best = self.best.entry(level.key()).or_insert(combined);
         if combined > *best {
             *best = combined;
         }
         self.fresh.remove(&format!("tempo:{}", level.bpm));
         let mut newly = Vec::new();
-        let LevelKind::Run(mask) = level.kind else { return newly };
-        if combined < PASS_THRESHOLD {
+        if !level.is_run() || combined < PASS_THRESHOLD {
             return newly;
         }
-        if mask == self.unlocked_mask() && level.bpm >= BASE_BPM && self.unlock_tokens == 0 && !self.all_ingredients() {
-            self.unlock_tokens = 1;
+        if self.unlock_tokens() > tokens {
             newly.push(Unlock::Token);
         }
         for b in neighbour_tempos(level.bpm) {
@@ -385,34 +395,39 @@ mod tests {
         // Drills keep their own best but unlock nothing.
         assert!(p.record(&Level::drill(quarters, 80), 95.0).is_empty());
         assert!(p.record(&Level::run(0, 80), 50.0).is_empty());
-        // Passing basic at 80 (all unlocked ingredients = none) earns a token and opens 60/100.
+        // The first pass earns a token and opens 60/100.
         let newly = p.record(&Level::run(0, 80), 85.0);
         assert_eq!(newly, vec![Unlock::Token, Unlock::Tempo(100), Unlock::Tempo(60)]);
         assert!(p.fresh.contains("tempo:100") && p.fresh.contains("tempo:60"));
-        assert_eq!(p.unlock_tokens, 1);
-        // One token at a time.
+        assert_eq!(p.unlock_tokens(), 1);
+        // Passing again earns nothing more.
         assert!(!p.record(&Level::run(0, 80), 90.0).contains(&Unlock::Token));
-        assert_eq!(p.unlock_tokens, 1);
+        assert_eq!(p.unlock_tokens(), 1);
         // The player picks palm mutes first.
         let pm = INGREDIENTS.iter().position(|i| i.bit == PM).unwrap();
         assert!(p.unlock_ingredient(pm));
         assert!(!p.unlock_ingredient(0), "no token left");
-        assert_eq!((p.unlock_tokens, p.unlocked_mask()), (0, PM));
+        assert_eq!((p.unlock_tokens(), p.unlocked_mask()), (0, PM));
         assert!(p.fresh.contains("ingredient:pm"));
         assert!(p.is_unlocked(&Level::run(PM, 80)) && !p.is_unlocked(&Level::run(SYNC, 80)));
         assert!(!p.is_unlocked(&Level::drill(offbeats, 80)), "offbeats need syncopation");
         assert!(p.is_unlocked(&Level::run(PM, 100)) && p.is_unlocked(&Level::run(PM, 60)), "reached tempos open for any unlocked set");
         assert!(!p.is_unlocked(&Level::run(PM, 120)), "120 not reached yet");
-        // A run without all unlocked ingredients earns no token.
+        // A run without a new ingredient earns no token.
         let newly = p.record(&Level::run(0, 100), 90.0);
         assert!(!newly.contains(&Unlock::Token), "{newly:?}");
-        assert_eq!(p.unlock_tokens, 0);
+        assert_eq!(p.unlock_tokens(), 0);
+        // P.M.'s first pass does, below a pass it doesn't.
+        assert!(p.record(&Level::run(PM, 80), 50.0).is_empty());
         assert!(p.record(&Level::run(PM, 80), 70.0).contains(&Unlock::Token));
+        assert!(!p.record(&Level::run(PM, 100), 70.0).contains(&Unlock::Token), "P.M. has earned its token");
         assert!(p.unlock_ingredient(0));
         assert_eq!(p.unlocked_mask(), PM | SYNC);
-        // Below 80 BPM never earns a token.
-        assert_eq!(p.record(&Level::run(PM | SYNC, 60), 90.0), vec![Unlock::Tempo(40)]);
-        assert_eq!(p.unlock_tokens, 0);
+        // Syncopation's first pass earns one at any tempo, with other ingredients on.
+        assert_eq!(p.record(&Level::run(PM | SYNC, 60), 90.0), vec![Unlock::Token, Unlock::Tempo(40)]);
+        assert_eq!(p.unlock_tokens(), 1);
+        assert!(!p.record(&Level::run(PM | SYNC, 60), 95.0).contains(&Unlock::Token));
+        assert_eq!(p.unlock_tokens(), 1);
         // Syncopation at 120 opens 140 for every set.
         p.record(&Level::run(0, 100), 90.0);
         assert_eq!(p.record(&Level::run(SYNC, 120), 70.0), vec![Unlock::Tempo(140)]);
@@ -454,7 +469,7 @@ mod tests {
         let mut p: Progress = serde_json::from_str(json).unwrap();
         p.migrate();
         assert_eq!(p.unlocked_mask(), SYNC | PM);
-        assert_eq!(p.unlock_tokens, 0);
+        assert_eq!(p.unlock_tokens(), 0);
         assert_eq!(p.xp, 24 + 10);
         assert_eq!(p.xp_seen, p.xp, "no fill animation for old XP");
         let saved = serde_json::to_string(&p).unwrap();
