@@ -96,6 +96,15 @@ pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
     if let Some(xp) = r.xp.filter(|x| *x > 0) {
         p.text(405.0, 410.0, format!("+{xp} xp"), 13.0, col::DIM, Align::Center);
     }
+    let tw = crate::score::TIMING_WEIGHT;
+    p.text(
+        405.0,
+        434.0,
+        format!("{tw:.1} \u{d7} {:.1} + {:.1} \u{d7} {:.1}", rep.timing_pct, 1.0 - tw, rep.tone_pct),
+        13.0,
+        col::FAINT,
+        Align::Center,
+    );
 
     // ---------- guru + verdict
     // The stage the menu last showed: a stage-up is revealed back on the main menu.

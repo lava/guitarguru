@@ -11,7 +11,7 @@
 //! - timing %      = (0.75 * uniformity % + 0.25 * drift %) * hit factor
 //! - tone %        = stroke consistency per pick direction and P.M./open group: volume,
 //!                   attack, sustain and brightness spreads (see `tone`)
-//! - combined %    = 0.6 * timing % + 0.4 * tone %;  pass at 60
+//! - combined %    = 0.7 * timing % + 0.3 * tone %;  pass at 60
 //! Onsets are assigned to notes against a local offset track (sliding median over +/-4 s)
 //! so matching survives a wandering player; all scores use the global offset.
 
@@ -223,8 +223,11 @@ pub fn timing_pct(spread_ms: f64, drift_rms_ms: f64, hit: f64) -> f64 {
     (0.75 * evenness_pct(spread_ms) + 0.25 * drift_pct(drift_rms_ms)) * hit
 }
 
+/// Share of timing in the combined score; tone has the rest.
+pub const TIMING_WEIGHT: f64 = 0.7;
+
 pub fn combined_pct(timing: f64, tone: f64) -> f64 {
-    0.6 * timing + 0.4 * tone
+    TIMING_WEIGHT * timing + (1.0 - TIMING_WEIGHT) * tone
 }
 
 pub fn score(inp: &ScoreInput) -> ScoreReport {
@@ -456,7 +459,7 @@ mod tests {
         assert!(r.spread_ms < 1e-6);
         assert!((r.timing_pct - 100.0).abs() < 1e-9);
         assert_eq!(r.tone_pct, 0.0, "no audio, no tone");
-        assert!((r.combined_pct - 60.0).abs() < 1e-9);
+        assert!((r.combined_pct - 100.0 * TIMING_WEIGHT).abs() < 1e-9);
     }
 
     #[test]
