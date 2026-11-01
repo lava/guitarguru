@@ -1,6 +1,6 @@
-//! Practice packs: song lists the player adds, each with unlock requirements like the
-//! built-in songs and optionally a riff to practise with a backing track. Nothing from a
-//! pack ships with the app; packs live in `<data dir>/packs/<name>/pack.json`.
+//! Practice packs: song lists the player adds, each song with unlock requirements on the
+//! tempo ladder and optionally a riff to practise with a backing track. The app ships no
+//! songs; packs live in `<data dir>/packs/<name>/pack.json`.
 //!
 //! ```json
 //! {
