@@ -289,6 +289,18 @@ pub struct Playback {
     pub pos: usize,
 }
 
+/// A backing track looped under a session: one pass of `samples` from `start_frame`
+/// (output frames), repeated until `end_frame`. The click is ducked while it plays.
+#[derive(Clone)]
+pub struct BackingPlan {
+    pub samples: Arc<Vec<f32>>,
+    pub start_frame: u64,
+    pub end_frame: u64,
+}
+
+/// Click gain while a backing track plays (-6 dB).
+const BACKING_CLICK_DUCK: f32 = 0.5;
+
 #[derive(Default)]
 pub struct Shared {
     pub in_peak: AtomicF32,
@@ -304,6 +316,7 @@ pub struct Shared {
     /// DSP time / block time of the monitoring chain (smoothed).
     pub dsp_load: AtomicF32,
     pub playback: Mutex<Option<Playback>>,
+    pub backing: Mutex<Option<BackingPlan>>,
     pub xruns: AtomicU32,
     /// Per-callback (frame, timestamp ns) logs during a session, for diagnosing clocks.
     pub log_on: AtomicBool,
@@ -515,6 +528,10 @@ impl AudioEngine {
 
     pub fn set_click(&self, plan: Option<ClickPlan>) {
         *self.shared.click.lock().unwrap() = plan;
+    }
+
+    pub fn set_backing(&self, plan: Option<BackingPlan>) {
+        *self.shared.backing.lock().unwrap() = plan;
     }
 
     pub fn play(&self, samples: Vec<f32>) {
@@ -946,12 +963,28 @@ impl OutState {
                 *pb = None;
             }
         }
+        let mut backing_from = u64::MAX;
+        if let Ok(b) = sh.backing.try_lock()
+            && let Some(b) = b.as_ref()
+            && !b.samples.is_empty()
+        {
+            backing_from = b.start_frame;
+            let len = b.samples.len() as u64;
+            for (i, v) in x.iter_mut().enumerate() {
+                let f = self.frame + i as u64;
+                if f >= b.start_frame && f < b.end_frame {
+                    *v += b.samples[((f - b.start_frame) % len) as usize];
+                }
+            }
+        }
         if let Ok(c) = sh.click.try_lock()
             && let Some(plan) = c.as_ref()
         {
             let g = sh.click_gain.load();
             for (i, v) in x.iter_mut().enumerate() {
-                *v += g * render_click(plan, self.frame + i as u64, f64::from(SAMPLE_RATE));
+                let f = self.frame + i as u64;
+                let duck = if f >= backing_from { BACKING_CLICK_DUCK } else { 1.0 };
+                *v += g * duck * render_click(plan, f, f64::from(SAMPLE_RATE));
             }
         }
         let peak = x.iter().fold(0.0f32, |m, v| m.max(v.abs()));

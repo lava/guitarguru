@@ -94,7 +94,7 @@ pub fn draw(g: &mut Game, p: &mut Paint, keys: &ButtonInput<KeyCode>, imgs: &Mas
 
     p.hline(MX, OPTIONS_Y - 32.0, MR - MX, col::LINE);
     match kind {
-        LevelKind::Run(_) => ingredients(g, p),
+        LevelKind::Run(_) | LevelKind::Riff(_) => ingredients(g, p),
         LevelKind::Drill(_) => {
             if let Some(d) = drill_options(g, p) {
                 g.selected = d;
@@ -147,6 +147,10 @@ pub fn draw(g: &mut Game, p: &mut Paint, keys: &ButtonInput<KeyCode>, imgs: &Mas
     }
     if let Some(m) = &g.message {
         p.text(MX, by + 70.0, fit(m, text_w, 13.0), 13.0, col::LATE, Align::Left);
+    } else if let Some((m, at)) = &g.notice
+        && g.clock - at < 5.0
+    {
+        p.text(MX, by + 70.0, fit(m, text_w, 13.0), 13.0, col::ONTIME, Align::Left);
     }
 }
 
@@ -470,6 +474,7 @@ fn song_list(g: &mut Game, p: &mut Paint) {
     p.hline(MX, SONGS_Y - 28.0, MR - MX, col::LINE);
     let col_w = (MR - MX - 40.0) / 2.0;
     let rows = list.len().div_ceil(2);
+    let mut practise = None;
     for (i, s) in list.into_iter().enumerate() {
         let (x, y) = (MX + (i / rows) as f32 * (col_w + 40.0), SONGS_Y + (i % rows) as f32 * SONG_ROW_H);
         let cy = y + SONG_ROW_H / 2.0;
@@ -477,9 +482,19 @@ fn song_list(g: &mut Game, p: &mut Paint) {
         let hov = p.hover(x, y, col_w, SONG_ROW_H);
         let revealed = s.revealed(&g.progress);
         let req = requirement(s);
-        if revealed {
+        if revealed && let Some(r) = s.riff {
+            // A pack riff: click to practise it.
+            let c = if hov { col::OCHRE } else { col::DIM };
+            p.ring(mx, cy, 14.0, if hov { col::OCHRE } else { col::FAINT });
+            p.tri(mx + 1.5, cy, 6.5, true, c);
+            if hov && p.clicked {
+                practise = crate::packs::riffs().get(r).map(|rf| Level { kind: LevelKind::Riff(r), bpm: rf.bpm });
+            }
+        } else if revealed {
             p.ring(mx, cy, 14.0, col::FAINT);
             note(p, mx, cy, col::DIM);
+        }
+        if revealed {
             let has_part = !s.part.is_empty();
             let ty = if has_part { cy - 9.0 } else { cy - 1.0 };
             let tw = col_w - 50.0;
@@ -505,6 +520,9 @@ fn song_list(g: &mut Game, p: &mut Paint) {
         } else if hov {
             p.tooltip(s.key(), req);
         }
+    }
+    if let Some(l) = practise {
+        g.start_level(l, false);
     }
 }
 

@@ -311,7 +311,7 @@ impl Progress {
             let l = Level::from_key(k)?;
             match l.kind {
                 LevelKind::Run(m) => Some((l.bpm, m)),
-                LevelKind::Drill(_) => None,
+                LevelKind::Drill(_) | LevelKind::Riff(_) => None,
             }
         })
     }

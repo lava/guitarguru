@@ -287,7 +287,7 @@ impl RunData {
     pub fn save_in(&self, dir: &std::path::Path, rep: &ScoreReport, onsets: &[Onset], worst: &[Window]) -> Result<PathBuf, String> {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
-        let base = dir.join(format!("{stamp}_{}", self.level.key().replace('@', "_")));
+        let base = dir.join(format!("{stamp}_{}", self.level.key().replace(['@', '/'], "_")));
         let wav = base.with_extension("wav");
         let spec = hound::WavSpec { channels: 1, sample_rate: self.sample_rate, bits_per_sample: 32, sample_format: hound::SampleFormat::Float };
         let mut w = hound::WavWriter::create(&wav, spec).map_err(|e| e.to_string())?;

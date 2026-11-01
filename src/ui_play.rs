@@ -53,6 +53,7 @@ pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
                     if v.is_empty() { vec!["basic".into()] } else { v }
                 }
                 crate::patterns::LevelKind::Drill(pi) => vec![format!("drill \u{b7} {}", PATTERNS[pi].name)],
+                crate::patterns::LevelKind::Riff(_) => vec![play.level.name()],
             }
         };
         p.label_at(284.0, 58.0, &sub.join(" \u{b7} "), Align::Left, col::DIM);

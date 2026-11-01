@@ -73,6 +73,7 @@ pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
     match lvl.kind {
         LevelKind::Run(m) => desc.extend(INGREDIENTS.iter().filter(|i| m & i.bit != 0).map(|i| i.name.to_string())),
         LevelKind::Drill(pi) => desc.push(format!("drill \u{b7} {}", PATTERNS[pi].name)),
+        LevelKind::Riff(_) => desc.push(lvl.name()),
     }
     p.label_at(207.0, 56.0, &desc.join(" \u{b7} "), Align::Left, col::DIM);
     if p.button(965.0, 34.0, 92.0, 44.0, "Again", false) {
@@ -216,6 +217,9 @@ pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
 
 fn next_level(g: &Game, r: &ResultsState) -> Option<Level> {
     let l = r.run.level;
+    if matches!(l.kind, LevelKind::Riff(_)) {
+        return None;
+    }
     let faster = Level { kind: l.kind, bpm: l.bpm + BPM_STEP };
     (faster.bpm <= BPM_MAX && g.progress.is_unlocked(&faster)).then_some(faster)
 }

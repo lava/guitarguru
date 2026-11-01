@@ -1,5 +1,6 @@
 mod audio;
 mod auto;
+mod backing;
 mod config;
 mod countin;
 mod detect;
@@ -8,6 +9,7 @@ mod game;
 mod generator;
 mod mascot;
 mod monitor;
+mod packs;
 mod paint;
 mod patterns;
 mod progress;
@@ -26,6 +28,28 @@ use bevy::window::WindowResolution;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("--backing") {
+        // `--backing <pack>/<song id> out.wav`: one pass of a riff's backing track.
+        let (Some(id), Some(out)) = (args.get(1), args.get(2)) else {
+            eprintln!("usage: guitarguru --backing <pack>/<song id> out.wav");
+            return;
+        };
+        let Some(r) = packs::riff_by_id(id).map(|i| &packs::riffs()[i]) else {
+            eprintln!("no riff `{id}`; have: {}", packs::riffs().iter().map(|r| r.id.as_str()).collect::<Vec<_>>().join(", "));
+            return;
+        };
+        let Some(s) = r.backing_samples() else {
+            eprintln!("`{id}` has no backing");
+            return;
+        };
+        let spec = hound::WavSpec { channels: 1, sample_rate: audio::SAMPLE_RATE, bits_per_sample: 32, sample_format: hound::SampleFormat::Float };
+        let mut w = hound::WavWriter::create(out, spec).expect("create wav");
+        for _ in 0..packs::RIFF_REPS {
+            s.iter().for_each(|v| w.write_sample(*v).expect("write"));
+        }
+        w.finalize().expect("finish wav");
+        return;
+    }
     if args.first().map(String::as_str) == Some("--rescore") {
         session::rescore_cli(&args[1..]);
         return;

@@ -5,7 +5,7 @@ use std::sync::atomic::Ordering;
 
 use bevy::prelude::*;
 
-use crate::audio::{AudioEngine, ClickPlan, DeviceEntry, SAMPLE_RATE};
+use crate::audio::{AudioEngine, BackingPlan, ClickPlan, DeviceEntry, SAMPLE_RATE};
 use crate::config::Config;
 use crate::countin::CountInGate;
 use crate::detect::Onset;
@@ -40,6 +40,8 @@ pub struct PlayState {
     pub gate: Option<CountInGate>,
     pub countin_seed_ms: Option<f64>,
     last_gate_check: f64,
+    /// One pass of a riff's backing track, started with the first scored bar.
+    backing: Option<std::sync::Arc<Vec<f32>>>,
 }
 
 impl PlayState {
@@ -105,6 +107,8 @@ pub struct Game {
     pub results: Option<ResultsState>,
     pub lists: SettingsLists,
     pub message: Option<String>,
+    /// A passing note on the main screen (e.g. a pack import) and when it was set.
+    pub notice: Option<(String, f64)>,
 }
 
 impl Game {
@@ -131,6 +135,7 @@ impl Game {
             results: None,
             lists: SettingsLists::default(),
             message: None,
+            notice: None,
         };
         g.restart_engine();
         g
@@ -239,10 +244,15 @@ impl Game {
             beats_per_bar: BEATS_PER_BAR,
         }));
         let allowance = if calibration { 0.0 } else { self.cfg.latency_ms.unwrap_or(0.0) / 1e3 };
+        let backing = match level.kind {
+            crate::patterns::LevelKind::Riff(r) => crate::packs::riffs().get(r).and_then(crate::packs::Riff::backing_samples),
+            _ => None,
+        };
         self.play = Some(PlayState {
             gate: Some(CountInGate::new(beat_seconds(bpm), allowance)),
             countin_seed_ms: None,
             last_gate_check: 0.0,
+            backing,
             level,
             plan,
             calibration,
@@ -265,6 +275,7 @@ impl Game {
     pub fn abort_play(&mut self) {
         if let Some(e) = &self.engine {
             e.set_click(None);
+            e.set_backing(None);
             e.stop_recording();
         }
         self.play = None;
@@ -307,6 +318,10 @@ impl Game {
                     beats: play.plan.total_beats(),
                     beats_per_bar: BEATS_PER_BAR,
                 }));
+                if let Some(samples) = play.backing.clone() {
+                    let at = |s: f64| play.click_start_frame + (s * sr).round() as u64;
+                    engine.set_backing(Some(BackingPlan { samples, start_frame: at(play.plan.scoring_start()), end_frame: at(play.plan.total_seconds()) }));
+                }
             }
             return;
         }
@@ -334,6 +349,7 @@ impl Game {
         play.plan.truncate(done_bars);
         play.ended_early = Some(now);
         engine.set_click(None);
+        engine.set_backing(None);
         self.finish_play();
     }
 
@@ -341,6 +357,7 @@ impl Game {
         let Some(play) = self.play.take() else { return };
         let Some(engine) = &self.engine else { return };
         engine.set_click(None);
+        engine.set_backing(None);
         let (rec_start, samples) = engine.stop_recording();
         let (in_stamps, out_stamps) = engine.take_clock_log(25);
         let clock = crate::session::ClockLog {
@@ -470,6 +487,21 @@ impl Game {
         }
     }
 
+    /// Import a practice pack dropped on the window (only from the main menu, so no riff
+    /// level is in use while the packs reload).
+    pub fn import_pack(&mut self, path: &std::path::Path) {
+        if self.screen != Screen::Menu {
+            return;
+        }
+        match crate::packs::import(path) {
+            Ok(name) => {
+                self.message = None;
+                self.notice = Some((format!("Imported {name}"), self.clock));
+            }
+            Err(e) => self.message = Some(format!("{}: {e}", path.file_name().map_or_else(String::new, |n| n.to_string_lossy().to_string()))),
+        }
+    }
+
     pub fn retry(&mut self) {
         if let Some(r) = &self.results {
             let (l, c) = (r.run.level, r.calibration);
@@ -491,9 +523,15 @@ pub fn game_system(
     keys: Res<ButtonInput<KeyCode>>,
     mascot: Option<Res<crate::mascot::MascotImages>>,
     mut exit: MessageWriter<AppExit>,
+    mut drops: MessageReader<bevy::window::FileDragAndDrop>,
 ) {
     let Some(mascot) = mascot else { return };
     let g = &mut *game;
+    for d in drops.read() {
+        if let bevy::window::FileDragAndDrop::DroppedFile { path_buf, .. } = d {
+            g.import_pack(path_buf);
+        }
+    }
     g.update_meter(time.delta_secs());
     g.clock += f64::from(time.delta_secs());
     // Calm ease-out fade on every screen change.

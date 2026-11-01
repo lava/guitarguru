@@ -368,6 +368,9 @@ pub enum LevelKind {
     Run(u8),
     /// One pattern only (index into `PATTERNS`).
     Drill(usize),
+    /// A practice-pack riff, looped a few times at its own tempo (index into
+    /// `packs::riffs`).
+    Riff(usize),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -396,6 +399,7 @@ impl Level {
         match self.kind {
             LevelKind::Run(m) => m,
             LevelKind::Drill(p) => PATTERNS[p].drill_needs(),
+            LevelKind::Riff(r) => crate::packs::riffs().get(r).map_or(0, crate::packs::Riff::mask),
         }
     }
     /// Are palm-mute markings in effect (runs without palm mutes play everything open).
@@ -415,11 +419,15 @@ impl Level {
                 format!("mix:{set}@{}", self.bpm)
             }
             LevelKind::Drill(p) => format!("{}@{}", PATTERNS[p].id, self.bpm),
+            LevelKind::Riff(r) => format!("riff:{}@{}", crate::packs::riffs().get(r).map_or("?", |r| r.id.as_str()), self.bpm),
         }
     }
     pub fn from_key(key: &str) -> Option<Self> {
         let (a, b) = key.split_once('@')?;
         let bpm = b.parse().ok()?;
+        if let Some(id) = a.strip_prefix("riff:") {
+            return Some(Self { kind: LevelKind::Riff(crate::packs::riff_by_id(id)?), bpm });
+        }
         if let Some(set) = a.strip_prefix("mix:") {
             let mut m = 0;
             if set != "basic" {
@@ -438,6 +446,7 @@ impl Level {
         match self.kind {
             LevelKind::Run(m) => mask_name(m),
             LevelKind::Drill(p) => format!("{} drill", PATTERNS[p].name),
+            LevelKind::Riff(r) => crate::packs::riffs().get(r).map_or_else(|| "riff".into(), |r| r.title.clone()),
         }
     }
     /// The patterns of a session of `bars` scored bars. Runs draw a fresh sequence per
@@ -446,6 +455,7 @@ impl Level {
     pub fn sequence(&self, bars: u32, seed: u64, avoid: &std::collections::HashSet<String>) -> Sequence {
         match self.kind {
             LevelKind::Drill(p) => Sequence::from_static(&vec![p; bars as usize]),
+            LevelKind::Riff(r) => crate::packs::riffs()[r].sequence(crate::packs::RIFF_REPS),
             LevelKind::Run(m) => crate::generator::run_sequence(m, self.bpm, bars, seed, avoid),
         }
     }

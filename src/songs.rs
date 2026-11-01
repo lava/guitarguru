@@ -31,6 +31,8 @@ pub struct Song {
     pub via: Via,
     /// Minimum combined score of that one run.
     pub min: f64,
+    /// The riff to practise, for pack songs that have one (index into `packs::riffs`).
+    pub riff: Option<usize>,
 }
 
 const B: f64 = 60.0;
@@ -38,11 +40,11 @@ const A: f64 = 75.0;
 const S: f64 = 90.0;
 
 const fn run(bpm: u32, artist: &'static str, title: &'static str, part: &'static str, needs: u8, min: f64) -> Song {
-    Song { artist, title, part, bpm, via: Via::Run(needs), min }
+    Song { artist, title, part, bpm, via: Via::Run(needs), min, riff: None }
 }
 
 const fn drill(bpm: u32, artist: &'static str, title: &'static str, part: &'static str, id: &'static str, min: f64) -> Song {
-    Song { artist, title, part, bpm, via: Via::Drill(id), min }
+    Song { artist, title, part, bpm, via: Via::Drill(id), min, riff: None }
 }
 
 pub const SONGS: &[Song] = &[
@@ -123,9 +125,10 @@ impl Song {
     }
 }
 
-/// The entries of one ladder rung, in table order.
+/// The entries of one ladder rung: the built-in ones in table order, then those from
+/// practice packs.
 pub fn at(bpm: u32) -> impl Iterator<Item = &'static Song> {
-    SONGS.iter().filter(move |s| s.bpm == bpm)
+    SONGS.iter().chain(crate::packs::songs()).filter(move |s| s.bpm == bpm)
 }
 
 #[cfg(test)]
