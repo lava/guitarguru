@@ -386,6 +386,19 @@ impl Riff {
         Some(Arc::new(samples))
     }
 
+    /// Free play: the riff's bars as rhythm only (no fretting) once, then `reps` times in
+    /// full. Without frettings this is just `sequence(reps + 1)`.
+    pub fn built_up(&self, reps: u32) -> crate::patterns::Sequence {
+        let mut seq = self.sequence(reps + 1);
+        let n = self.bars.len();
+        if n == 0 || self.bars.iter().all(|b| b.frets.is_none()) {
+            return seq;
+        }
+        seq.patterns.extend(self.bars.iter().map(|b| Pattern { id: format!("{}-rhythm", b.id).into(), frets: None, ..b.clone() }));
+        seq.bar_patterns[..n].iter_mut().for_each(|p| *p += n);
+        seq
+    }
+
     /// The riff's bars, `reps` times.
     pub fn sequence(&self, reps: u32) -> crate::patterns::Sequence {
         let n = self.bars.len();
@@ -477,6 +490,9 @@ mod tests {
         assert_eq!(r.mask(), crate::patterns::LH);
         let seq = r.sequence(RIFF_REPS);
         assert_eq!(seq.bar_patterns, vec![0, 1, 0, 1, 0, 1, 0, 1]);
+        let up = r.built_up(2);
+        assert_eq!(up.bar_patterns, vec![2, 3, 0, 1, 0, 1]);
+        assert!(up.patterns[2].frets.is_none() && up.patterns[2].notation == up.patterns[0].notation);
         let b = r.backing_samples().unwrap();
         let pass = 2.0 * 4.0 * 60.0 / 124.0;
         assert_eq!(b.len(), (pass * 48000.0_f64).round() as usize);

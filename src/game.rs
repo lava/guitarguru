@@ -18,6 +18,12 @@ use crate::session::{RunData, Window};
 
 pub const SCORED_SECONDS: f64 = 120.0;
 pub const CALIBRATION_BPM: u32 = 100;
+/// Free play (riffs) loops until the player stops; the plan ends after this long.
+pub const FREE_PLAY_MAX_SECONDS: f64 = 3600.0;
+/// Free play keeps only this much of the recording...
+pub const FREE_PLAY_KEEP_SECONDS: f64 = 240.0;
+/// ...and its results look at the last this many passes.
+pub const FREE_PLAY_PASSES: u32 = 10;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Screen {
@@ -68,6 +74,10 @@ pub struct ResultsState {
     pub difficulty_note: Option<String>,
     pub listening: Option<usize>,
     pub calibration: bool,
+    /// Free play: no score, just the stats of the last passes.
+    pub free: bool,
+    /// Passes the stats cover (free play).
+    pub passes: u32,
     /// XP this run earned (None for calibration and saved runs).
     pub xp: Option<u32>,
     /// Height of the results page as last drawn (design px).
@@ -225,13 +235,20 @@ impl Game {
             self.message = Some("No audio engine - check Settings".into());
             return;
         };
-        let seconds = if calibration { 8.0 * crate::patterns::bar_seconds(bpm) } else { SCORED_SECONDS };
+        let free = level.free_play() && !calibration;
+        let seconds = if calibration {
+            8.0 * crate::patterns::bar_seconds(bpm)
+        } else if free {
+            FREE_PLAY_MAX_SECONDS
+        } else {
+            SCORED_SECONDS
+        };
         // Placeholder plan: the real count-in length is set when the count-in gate opens.
         // A fresh draw every time, passing over the patterns of the last runs of this level.
         let avoid = self.progress.recent_patterns(&level.key());
         let seq = level.sequence(crate::patterns::scored_bars(bpm, seconds), crate::generator::random_seed(), &avoid);
         let plan = SessionPlan::from_sequence(bpm, 1, seq, level.pm_on());
-        engine.start_recording();
+        engine.start_recording(free.then_some(FREE_PLAY_KEEP_SECONDS));
         engine.start_clock_log();
         let sr = f64::from(SAMPLE_RATE);
         let start = engine.shared.out_frames.load(Ordering::Relaxed) + (0.4 * sr) as u64;
@@ -340,8 +357,13 @@ impl Game {
         let now = play.now(engine);
         let bar = crate::patterns::bar_seconds(play.plan.bpm);
         let start = play.plan.scoring_start();
-        let done_bars = ((now - start) / bar).floor().max(0.0) as u32;
-        if done_bars < 2 {
+        let mut done_bars = ((now - start) / bar).floor().max(0.0) as u32;
+        if play.level.free_play() {
+            // Whole passes only.
+            let pass = play.level.pass_bars();
+            done_bars -= done_bars % pass;
+        }
+        if done_bars < 2 && !(play.level.free_play() && done_bars > 0) {
             self.abort_play();
             return;
         }
@@ -354,11 +376,19 @@ impl Game {
     }
 
     fn finish_play(&mut self) {
-        let Some(play) = self.play.take() else { return };
+        let Some(mut play) = self.play.take() else { return };
         let Some(engine) = &self.engine else { return };
         engine.set_click(None);
         engine.set_backing(None);
-        let (rec_start, samples) = engine.stop_recording();
+        let (mut rec_start, mut samples) = engine.stop_recording();
+        let free = play.level.free_play() && !play.calibration;
+        let mut passes = 0;
+        if free {
+            let rec0 = (rec_start as f64 - play.click_start_frame as f64 - play.delta_frames) / f64::from(SAMPLE_RATE);
+            let (n, cut) = free_play_window(&mut play.plan, play.level.pass_bars(), rec0, &mut samples);
+            passes = n;
+            rec_start += cut as u64;
+        }
         let (in_stamps, out_stamps) = engine.take_clock_log(25);
         let clock = crate::session::ClockLog {
             in_stamps,
@@ -397,6 +427,8 @@ impl Game {
                 self.cfg.latency_ms = Some(rep.latency_ms);
                 self.cfg.save();
             }
+        } else if free {
+            // Free play has no score: nothing goes into the progress.
         } else {
             newly = self.progress.record(&run.level, rep.combined_pct);
             self.progress.history.push(HistoryEntry {
@@ -431,6 +463,8 @@ impl Game {
             prev_best,
             listening: None,
             calibration: play.calibration,
+            free,
+            passes,
             xp,
             content_h: None,
         });
@@ -450,6 +484,7 @@ impl Game {
         let (rep, onsets) = run.analyse();
         let worst = run.worst_windows(&rep, &onsets, 3);
         let prev_best = self.progress.best_entry(&run.level.key()).cloned();
+        let (free, passes) = (run.level.free_play(), run.plan.scored_bars / run.level.pass_bars());
         self.results = Some(ResultsState {
             run,
             rep,
@@ -461,6 +496,8 @@ impl Game {
             difficulty_note: None,
             listening: None,
             calibration: false,
+            free,
+            passes,
             xp: None,
             content_h: None,
         });
@@ -511,6 +548,32 @@ impl Game {
     }
 }
 
+/// Narrow a free-play take to its last [`FREE_PLAY_PASSES`] whole passes of `pass` bars
+/// that the rolling recording still holds; `rec0` is the session time of `samples[0]`.
+/// The plan's earlier bars become count-in, a rhythm-only first pass is left out once
+/// there is a full one, and the recording is cut to the kept passes (half a bar either
+/// side). Returns (passes kept, samples cut from the front).
+fn free_play_window(plan: &mut SessionPlan, pass: u32, rec0: f64, samples: &mut Vec<f32>) -> (u32, usize) {
+    let sr = f64::from(SAMPLE_RATE);
+    let warmup = u32::from(plan.patterns.len() as u32 > pass);
+    let bar = crate::patterns::bar_seconds(plan.bpm);
+    let total = plan.scored_bars / pass;
+    let rec1 = rec0 + samples.len() as f64 / sr;
+    let pass_start = |k: u32| plan.scoring_start() + f64::from(k * pass) * bar;
+    let mut first = total.saturating_sub(FREE_PLAY_PASSES).max(warmup.min(total.saturating_sub(1)));
+    while first + 1 < total && pass_start(first) - 0.5 * bar < rec0 {
+        first += 1;
+    }
+    plan.truncate(total * pass);
+    plan.drop_front(first * pass);
+    let a = ((plan.scoring_start() - 0.5 * bar - rec0) * sr).max(0.0) as usize;
+    let b = (((plan.total_seconds() + 0.5 * bar).min(rec1) - rec0) * sr).max(0.0) as usize;
+    samples.truncate(b.max(a).min(samples.len()));
+    let a = a.min(samples.len());
+    samples.drain(..a);
+    (total - first, a)
+}
+
 pub fn calibration_level() -> Level {
     Level::drill(PATTERNS.iter().position(|p| p.id == "quarters").expect("quarters pattern"), CALIBRATION_BPM)
 }
@@ -558,7 +621,12 @@ pub fn game_system(
         }
         Screen::Play => {
             if keys.just_pressed(KeyCode::Escape) {
-                g.abort_play();
+                // Free play ends (with results) on Esc; anything else aborts.
+                if g.play.as_ref().is_some_and(|p| p.level.free_play() && !p.calibration) {
+                    g.end_early();
+                } else {
+                    g.abort_play();
+                }
                 return;
             }
             if keys.just_pressed(KeyCode::Enter) {
@@ -579,5 +647,56 @@ pub fn game_system(
             }
             crate::ui_results::draw(g, &mut paint, mascot);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::patterns::{PATTERNS, Sequence};
+
+    /// A riff-like plan: a 2-bar pass, a rhythm-only warm-up pass (patterns 2, 3), then
+    /// `full` full passes (patterns 0, 1), after one bar of count-in.
+    fn plan(full: usize) -> SessionPlan {
+        let mut bars = vec![2, 3];
+        for _ in 0..full {
+            bars.extend([0, 1]);
+        }
+        let patterns = (0..4).map(|i| PATTERNS[i].clone()).collect();
+        SessionPlan::from_sequence(120, 1, Sequence { patterns, bar_patterns: bars, seed: None }, false)
+    }
+
+    #[test]
+    fn free_play_keeps_the_last_full_passes() {
+        let sr = f64::from(SAMPLE_RATE);
+        // 30 full passes (2 s bars at 120 BPM), recorded from the start.
+        let mut p = plan(30);
+        let times: Vec<f64> = p.notes.iter().map(|n| n.time).collect();
+        let mut samples = vec![0.0; (p.total_seconds() * sr) as usize];
+        let (n, cut) = free_play_window(&mut p, 2, 0.0, &mut samples);
+        assert_eq!(n, FREE_PLAY_PASSES);
+        assert_eq!(p.scored_bars, 2 * FREE_PLAY_PASSES);
+        assert_eq!(p.count_in_bars, 1 + 2 * (31 - FREE_PLAY_PASSES));
+        assert!(p.notes.iter().all(|n| times.contains(&n.time)), "notes keep their times");
+        assert_eq!(p.notes[0].bar, 0);
+        assert_eq!(cut, ((p.scoring_start() - 1.0) * sr) as usize);
+        assert_eq!(samples.len(), ((2.0 * 2.0 * f64::from(FREE_PLAY_PASSES) + 1.0) * sr) as usize);
+
+        // Few passes: the warm-up is left out once there is a full one.
+        let mut p = plan(3);
+        let mut samples = vec![0.0; (p.total_seconds() * sr) as usize];
+        assert_eq!(free_play_window(&mut p, 2, 0.0, &mut samples).0, 3);
+        assert!(p.bar_patterns.iter().all(|&b| b < 2));
+        let mut p = plan(0);
+        let mut samples = vec![0.0; (p.total_seconds() * sr) as usize];
+        assert_eq!(free_play_window(&mut p, 2, 0.0, &mut samples).0, 1);
+
+        // The rolling recording only reaches back 15 s: passes before that are dropped.
+        let mut p = plan(30);
+        let rec0 = p.total_seconds() - 15.0;
+        let mut samples = vec![0.0; (15.0 * sr) as usize];
+        let (n, _) = free_play_window(&mut p, 2, rec0, &mut samples);
+        assert_eq!(n, 3);
+        assert!(p.scoring_start() - 1.0 >= rec0);
     }
 }

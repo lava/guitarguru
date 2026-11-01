@@ -37,10 +37,13 @@ pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
         let total = play.plan.total_seconds();
         let start = play.plan.scoring_start();
         let waiting = play.waiting();
+        let free = play.level.free_play() && !play.calibration;
 
         // Time left: 4 px ochre bar anchored at the right edge.
         let left = if waiting || t < start { 1.0 } else { (1.0 - (t - start) / (total - start)).clamp(0.0, 1.0) as f32 };
-        p.rect(1440.0 * (1.0 - left), 0.0, 1440.0 * left, 4.0, col::OCHRE);
+        if !free {
+            p.rect(1440.0 * (1.0 - left), 0.0, 1440.0 * left, 4.0, col::OCHRE);
+        }
 
         // Header
         p.serif(120.0, 50.0, format!("{bpm} BPM"), 44.0, col::TEXT, Align::Left);
@@ -60,10 +63,17 @@ pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
         let bar_no = ((t - start) / bar_s).floor() as i64 + 1;
         let bars = if t < start || waiting { "\u{2013}".to_string() } else { format!("{} / {}", bar_no.min(i64::from(play.plan.scored_bars)), play.plan.scored_bars) };
         let rem = if waiting { (total - start) as u32 } else { (total - t.max(start)).max(0.0) as u32 };
-        p.label_at(944.0, 58.0, "bar", Align::Right, col::DIM);
-        p.serif(966.0, 54.0, bars, 26.0, col::TEXT, Align::Left);
-        p.label_at(1076.0, 58.0, "left", Align::Right, col::DIM);
-        p.serif(1097.0, 54.0, format!("{}:{:02}", rem / 60, rem % 60), 26.0, col::TEXT, Align::Left);
+        if free {
+            let pass = if t < start || waiting { "\u{2013}".to_string() } else { format!("{}", (bar_no - 1).max(0) / i64::from(play.level.pass_bars()) + 1) };
+            p.label_at(760.0, 58.0, "pass", Align::Right, col::DIM);
+            p.serif(782.0, 54.0, pass, 26.0, col::TEXT, Align::Left);
+            p.italic(1180.0, 58.0, "free play \u{b7} Esc to end", 22.0, col::TEXT, Align::Right);
+        } else {
+            p.label_at(944.0, 58.0, "bar", Align::Right, col::DIM);
+            p.serif(966.0, 54.0, bars, 26.0, col::TEXT, Align::Left);
+            p.label_at(1076.0, 58.0, "left", Align::Right, col::DIM);
+            p.serif(1097.0, 54.0, format!("{}:{:02}", rem / 60, rem % 60), 26.0, col::TEXT, Align::Left);
+        }
         if p.round_button(1238.0, 52.0, 22.0, "x") {
             abort = true;
         }
@@ -123,9 +133,11 @@ pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
         let gap = if tab { 34.0 } else { 52.0 };
         let cur_pat = &play.plan.patterns[cur];
         let playhead = if in_count_in { None } else { Some(pos16) };
-        let letter = section_letter(&play.plan.bar_patterns, cur);
+        let letter = crate::patterns::section_letter(&play.plan.patterns, &play.plan.bar_patterns, cur).to_string();
         pattern_name(p, &letter, &cur_pat.name, name_y, col::TEXT);
-        let bottom = stroke_diagram(p, cur_pat, BAR_X, name_y + NAME_H, BAR_CELL, BAR_ARROW, playhead, pm_on, tab, 1.0);
+        // A riff's first pass is rhythm only: no tab for bars without fretting.
+        let tab_of = |pat: &Pattern| tab && (pat.frets.is_some() || !play.level.free_play());
+        let bottom = stroke_diagram(p, cur_pat, BAR_X, name_y + NAME_H, BAR_CELL, BAR_ARROW, playhead, pm_on, tab_of(cur_pat), 1.0);
 
         // ---------- next pattern: comes in below during the last two bars before a switch
         // (never on the song's last bar); the countdown line between the two runs during the
@@ -142,7 +154,7 @@ pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
                     let y = bottom + gap + (1.0 - fade) * 16.0;
                     let a = |c: Color| c.with_alpha(alpha);
                     pattern_name(p, "next", &next_pat.name, y, a(col::TEXT));
-                    stroke_diagram(p, next_pat, BAR_X, y + NAME_H, BAR_CELL, BAR_ARROW, None, pm_on, tab, alpha);
+                    stroke_diagram(p, next_pat, BAR_X, y + NAME_H, BAR_CELL, BAR_ARROW, None, pm_on, tab_of(next_pat), alpha);
                     if remain <= bar_s {
                         let k = (remain / bar_s) as f32;
                         let ly = bottom + (gap - 14.0) / 2.0;
@@ -152,7 +164,9 @@ pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
                 }
             }
         }
-        p.text(1320.0, 880.0, "Enter: end & score \u{b7} Esc: abort", 12.0, col::FAINT, Align::Right);
+        if !free {
+            p.text(1320.0, 880.0, "Enter: end & score \u{b7} Esc: abort", 12.0, col::FAINT, Align::Right);
+        }
     }
     if abort {
         g.abort_play();
@@ -167,18 +181,6 @@ fn pattern_name(p: &mut Paint, label: &str, name: &str, y: f32, color: Color) {
     let lw = label.chars().count() as f32 * 9.5 + 14.0;
     p.label_at(BAR_X, y + 1.0, label, Align::Left, col::DIM.with_alpha(color.alpha()));
     p.serif(BAR_X + lw, y - 2.0, fit(name, BAR_W - lw, NAME_SIZE), NAME_SIZE, color, Align::Left);
-}
-
-/// Section letter (A, B, ...) of a pattern by its first appearance in the run.
-fn section_letter(bars: &[usize], pat: usize) -> String {
-    let mut seen: Vec<usize> = Vec::new();
-    for &b in bars {
-        if !seen.contains(&b) {
-            seen.push(b);
-        }
-    }
-    let i = seen.iter().position(|&x| x == pat).unwrap_or(0);
-    ((b'A' + (i as u8 % 26)) as char).to_string()
 }
 
 fn mix(a: Color, b: Color, k: f32) -> Color {

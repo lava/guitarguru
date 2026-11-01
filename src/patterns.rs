@@ -439,6 +439,17 @@ impl Level {
         }
         Some(Self::drill(PATTERNS.iter().position(|p| p.id == a)?, bpm))
     }
+    /// Bars per pass of a riff (1 for other levels).
+    pub fn pass_bars(&self) -> u32 {
+        match self.kind {
+            LevelKind::Riff(r) => crate::packs::riffs().get(r).map_or(1, |r| r.bars.len().max(1) as u32),
+            _ => 1,
+        }
+    }
+    /// Riffs loop open-endedly until the player stops (no score).
+    pub fn free_play(&self) -> bool {
+        matches!(self.kind, LevelKind::Riff(_))
+    }
     pub fn is_run(&self) -> bool {
         matches!(self.kind, LevelKind::Run(_))
     }
@@ -455,7 +466,10 @@ impl Level {
     pub fn sequence(&self, bars: u32, seed: u64, avoid: &std::collections::HashSet<String>) -> Sequence {
         match self.kind {
             LevelKind::Drill(p) => Sequence::from_static(&vec![p; bars as usize]),
-            LevelKind::Riff(r) => crate::packs::riffs()[r].sequence(crate::packs::RIFF_REPS),
+            LevelKind::Riff(r) => {
+                let riff = &crate::packs::riffs()[r];
+                riff.built_up(bars.div_ceil(riff.bars.len().max(1) as u32))
+            }
             LevelKind::Run(m) => crate::generator::run_sequence(m, self.bpm, bars, seed, avoid),
         }
     }
@@ -561,6 +575,16 @@ impl SessionPlan {
         self.bar_patterns.truncate(bars as usize);
         self.scored_bars = bars;
     }
+    /// Drop the first `bars` scored bars; they become count-in, so every note keeps its
+    /// time.
+    pub fn drop_front(&mut self, bars: u32) {
+        let bars = bars.min(self.scored_bars);
+        self.notes.retain(|n| n.bar >= bars);
+        self.notes.iter_mut().for_each(|n| n.bar -= bars);
+        self.bar_patterns.drain(..bars as usize);
+        self.scored_bars -= bars;
+        self.count_in_bars += bars;
+    }
     pub fn total_beats(&self) -> u32 {
         (self.count_in_bars + self.scored_bars) * BEATS_PER_BAR
     }
@@ -570,6 +594,21 @@ impl SessionPlan {
     pub fn scoring_start(&self) -> f64 {
         f64::from(self.count_in_bars) * bar_seconds(self.bpm)
     }
+}
+
+/// Section letter (A, B, ...) of pattern `pat` by its first appearance in `bars`; a riff
+/// bar's rhythm-only version (id `<id>-rhythm`) shares its letter.
+pub fn section_letter(patterns: &[Pattern], bars: &[usize], pat: usize) -> char {
+    let key = |p: usize| patterns[p].id.strip_suffix("-rhythm").unwrap_or(&patterns[p].id).to_string();
+    let mut seen: Vec<String> = Vec::new();
+    for &b in bars {
+        let k = key(b);
+        if !seen.contains(&k) {
+            seen.push(k);
+        }
+    }
+    let i = seen.iter().position(|k| *k == key(pat)).unwrap_or(0);
+    (b'A' + (i as u8 % 26)) as char
 }
 
 /// Scored bars of a session of about `seconds` seconds.

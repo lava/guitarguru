@@ -336,12 +336,17 @@ fn log_stamp(on: &AtomicBool, log: &Mutex<Vec<(u64, u128)>>, frame: u64, ns: u12
     }
 }
 
+/// How far a rolling recording may grow past what it keeps before it is cut back.
+const KEEP_SLACK: usize = SAMPLE_RATE as usize * 30;
+
 #[derive(Default)]
 pub struct Recording {
     pub active: bool,
     /// Input frame index of `samples[0]`.
     pub start_frame: u64,
     pub samples: Vec<f32>,
+    /// Keep only about the last this many samples (open-ended free play).
+    pub keep: Option<usize>,
 }
 
 pub struct EngineInfo {
@@ -479,6 +484,14 @@ impl AudioEngine {
                             }
                             r.samples.extend_from_slice(a);
                             r.samples.extend_from_slice(b);
+                            // Drop the oldest audio in big steps, so it moves rarely.
+                            if let Some(k) = r.keep
+                                && r.samples.len() > k + KEEP_SLACK
+                            {
+                                let cut = r.samples.len() - k;
+                                r.samples.drain(..cut);
+                                r.start_frame += cut as u64;
+                            }
                         }
                     }
                     frame += n as u64;
@@ -495,11 +508,14 @@ impl AudioEngine {
         drop(old);
     }
 
-    /// Start a recording; any previous one is discarded.
-    pub fn start_recording(&self) {
+    /// Start a recording; any previous one is discarded. With `keep_seconds`, only about
+    /// the last that many seconds are kept.
+    pub fn start_recording(&self, keep_seconds: Option<f64>) {
         let mut r = self.recording.lock().unwrap();
         r.samples.clear();
-        r.samples.reserve(SAMPLE_RATE as usize * 180);
+        let keep = keep_seconds.map(|s| (s * f64::from(SAMPLE_RATE)) as usize);
+        r.keep = keep;
+        r.samples.reserve(keep.map_or(SAMPLE_RATE as usize * 180, |k| k + KEEP_SLACK));
         r.active = true;
     }
 

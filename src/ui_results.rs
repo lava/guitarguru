@@ -87,6 +87,11 @@ pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
         action = Action::Menu;
     }
 
+    // Free play: no score, verdict or progress; stats of the last passes, then the run.
+    let (run_y, passages_y, timing_y) = if r.free { (300.0, 550.0, 820.0) } else { (580.0, 830.0, 1100.0) };
+    if r.free {
+        free_stats(p, r, 113.0, 140.0);
+    } else {
     // ---------- mandala
     let pass = rep.combined_pct >= PASS_THRESHOLD;
     let shown = rep.combined_pct as f32 * ease(since / 1.4);
@@ -162,12 +167,13 @@ pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
         }
         Err(e) => p.text(752.0, 548.0, format!("save failed: {e}"), 11.0, col::LATE, Align::Left),
     }
+    }
 
     // ---------- the whole run
-    run_timeline(p, r, 113.0, 580.0, playing);
+    run_timeline(p, r, 113.0, run_y, playing);
 
     // ---------- problem passages
-    let ly = 830.0;
+    let ly = passages_y;
     p.italic(113.0, ly, "Problem passages", 34.0, col::TEXT, Align::Left);
     p.hline(113.0, ly + 24.0, 1130.0, col::LINE);
     for (i, w) in r.worst.iter().enumerate() {
@@ -185,7 +191,7 @@ pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
     }
 
     // ---------- timing
-    let bottom = timing_section(p, r, 113.0, 1100.0);
+    let bottom = timing_section(p, r, 113.0, timing_y);
     // ---------- tone
     let end = tone_section(p, r, 113.0, bottom + 60.0);
 
@@ -212,6 +218,30 @@ pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
         && g.engine.as_ref().and_then(|e| e.playback_pos()).is_none()
     {
         r.listening = None;
+    }
+}
+
+/// Free play's fact columns: passes covered, evenness, offset, drift, hits and misses.
+fn free_stats(p: &mut Paint, r: &ResultsState, x: f32, y: f32) {
+    let rep = &r.rep;
+    p.hline(x, y, 1130.0, col::LINE);
+    let cols: [(&str, String, Color); 5] = [
+        ("passes", format!("{}", r.passes), col::TEXT),
+        ("evenness", format!("\u{b1}{:.0} ms", rep.spread_ms), col::EARLY),
+        ("offset", rep.mean_offset_ms.map_or("\u{2013}".into(), |o| format!("{o:+.0} ms")), rep.mean_offset_ms.map_or(col::TEXT, dev_color)),
+        ("drift", format!("{:.0} ms", rep.drift_rms_ms), col::TEXT),
+        ("hit \u{b7} miss \u{b7} extra", format!("{} \u{b7} {} \u{b7} {}", rep.n_matched, rep.n_missed, rep.n_extra), col::TEXT),
+    ];
+    for (i, (lab, v, c)) in cols.iter().enumerate() {
+        let cx = x + i as f32 * 226.0;
+        if i > 0 {
+            p.rect(cx - 12.0, y, 1.0, 100.0, col::LINE);
+        }
+        p.label(cx, y + 20.0, lab);
+        p.serif(cx, y + 54.0, v.clone(), 34.0, *c, Align::Left);
+    }
+    if let Err(e) = &r.saved {
+        p.text(x, y + 126.0, format!("save failed: {e}"), 11.0, col::LATE, Align::Left);
     }
 }
 
@@ -412,9 +442,7 @@ fn err(rep: &ScoreReport, i: usize) -> f64 {
 }
 
 fn letter_of(run: &crate::session::RunData, pat: usize) -> char {
-    let used = run.patterns_used();
-    let i = used.iter().position(|&x| x == pat).unwrap_or(0);
-    (b'A' + (i as u8 % 26)) as char
+    crate::patterns::section_letter(&run.plan.patterns, &run.plan.bar_patterns, pat)
 }
 
 fn section_header(p: &mut Paint, x: f32, y: f32, title: &str, label: &str) {
@@ -557,8 +585,8 @@ fn run_timeline(p: &mut Paint, r: &ResultsState, x: f32, y: f32, playing: Option
         let ys = |ms: f64| dy + dh / 2.0 - (ms.clamp(-120.0, 120.0) / 120.0) as f32 * dh / 2.0;
         // section shading (alternate patterns)
         let bar_s = bar_seconds(r.run.plan.bpm);
-        // Session time, like the notes' grid times.
-        let st = r.run.plan.scoring_start();
+        // Recording time, like the notes' grid times.
+        let st = r.run.plan.scoring_start() + r.run.grid_offset_s;
         let mut b = 0usize;
         while b < r.run.plan.bar_patterns.len() {
             let pat = r.run.plan.bar_patterns[b];
@@ -590,7 +618,7 @@ fn run_timeline(p: &mut Paint, r: &ResultsState, x: f32, y: f32, playing: Option
                 && let Some((pos, _)) = playing
                 && let Some(pos) = pos.checked_sub(r.run.listen_lead_frames(w))
             {
-                let t = r.run.window_span(w).0 + pos as f64 / f64::from(r.run.sample_rate);
+                let t = r.run.window_span(w).0 + r.run.grid_offset_s + pos as f64 / f64::from(r.run.sample_rate);
                 let ph = xs(t);
                 if ph >= xa && ph <= xb {
                     p.rect(ph - 0.75, dy, 1.5, dh, PASSAGE);
