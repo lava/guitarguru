@@ -14,7 +14,7 @@ use std::borrow::Cow;
 use serde::{Deserialize, Serialize};
 
 pub const BPM_MIN: u32 = 40;
-pub const BPM_MAX: u32 = 180;
+pub const BPM_MAX: u32 = 200;
 pub const BPM_STEP: u32 = 20;
 pub const BASE_BPM: u32 = 80;
 pub const SIXTEENTHS_PER_BAR: f64 = 16.0;
