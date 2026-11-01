@@ -232,12 +232,13 @@ pub mod tests {
         assert_eq!(on.len(), hits.len(), "{:?}", on.iter().map(|o| o.time).collect::<Vec<_>>());
     }
 
-    /// The palm-muted reference takes the detector was first tuned on (skipped if absent):
-    /// nearly every grid note is found, with few unmatched detections.
+    /// Reference takes in `GG_TAKES_DIR` (`<session>/<part> - Gtr I/` with a `grid.json` and
+    /// `Audio Files/Guitar DI_*.wav`; skipped if unset): nearly every grid note is found,
+    /// with few unmatched detections.
     #[test]
-    #[ignore = "needs reference takes"]
+    #[ignore = "needs reference takes in GG_TAKES_DIR"]
     fn reference_takes_still_detect() {
-        let root = std::path::Path::new("reference-takes");
+        let Some(root) = std::env::var_os("GG_TAKES_DIR") else { return };
         let Ok(sessions) = std::fs::read_dir(root) else { return };
         for sess in sessions.flatten() {
             let Ok(parts) = std::fs::read_dir(sess.path()) else { continue };

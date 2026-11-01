@@ -103,7 +103,7 @@ pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
 
     // ---------- your guitar
     p.serif(LX, 139.0, "Your guitar", 28.0, col::TEXT, Align::Left);
-    let mut rows = vec![("Auto (BANDFUSE)".to_string(), "shared, else direct".to_string(), g.cfg.audio.input_device.is_none())];
+    let mut rows = vec![("Auto".to_string(), "shared, else direct".to_string(), g.cfg.audio.input_device.is_none())];
     let inputs = g.lists.inputs.clone();
     for d in &inputs {
         let (kind, name) = d.label.split_once("  ").unwrap_or(("", d.label.as_str()));

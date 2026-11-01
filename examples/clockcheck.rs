@@ -1,10 +1,12 @@
-//! Measure frame counts vs wall clock for PulseAudio input (BANDFUSE) and default output.
+//! Measure frame counts vs wall clock for a PulseAudio input and the default output.
+//! Usage: `cargo run --example clockcheck -- <part of the input's name>`.
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 fn main() {
     let host = cpal::host_from_id(cpal::HostId::PulseAudio).unwrap();
-    let indev = host.input_devices().unwrap().find(|d| d.description().map(|x| x.name().contains("BANDFUSE")).unwrap_or(false)).unwrap();
+    let want = std::env::args().nth(1).expect("usage: clockcheck <part of the input's name>");
+    let indev = host.input_devices().unwrap().find(|d| d.description().map(|x| x.name().contains(&want)).unwrap_or(false)).expect("no such input");
     let outdev = host.default_output_device().unwrap();
     let inn = Arc::new(AtomicU64::new(0));
     let out = Arc::new(AtomicU64::new(0));

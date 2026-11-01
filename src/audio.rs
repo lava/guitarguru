@@ -204,8 +204,9 @@ pub fn explain_missing(alsa_card: &str, label: &str) -> String {
     }
 }
 
-/// Input candidates in the order to try. Auto: BANDFUSE through PipeWire (shared), then
-/// direct ALSA. Returns (candidates, adapter present?).
+/// Input candidates in the order to try. Auto: a known USB guitar cable (the BANDFUSE
+/// adapter) through PipeWire (shared), then direct ALSA; other interfaces are picked in
+/// Setup. Returns (candidates, adapter present?).
 fn find_input(want: Option<&str>) -> (Vec<cpal::Device>, bool) {
     let all = all_devices(true);
     if let Some(w) = want {
@@ -635,7 +636,7 @@ fn build_streams(
             Some((st, label, cfg)) => (InputHandle::Device(st), label, format!("{:?}", cfg.buffer_size)),
             None if s.input_device.is_none() && !present => {
                 // No adapter at all: open the default input for the meter, monitoring muted.
-                let dev = host.default_input_device().ok_or("BANDFUSE adapter not found and no default input")?;
+                let dev = host.default_input_device().ok_or("no guitar adapter found and no default input")?;
                 let cfgs = dev.supported_input_configs().map_err(|e| e.to_string())?;
                 let (cfg, bs) = pick_config(cfgs.collect(), SAMPLE_RATE, 1, 1).ok_or("default input: no 48 kHz config")?;
                 let mut sc: cpal::StreamConfig = cfg.config();
@@ -665,7 +666,7 @@ fn build_streams(
     };
     let mut warning = None;
     if !fake && s.input_device.is_none() && !present {
-        warning = Some("BANDFUSE adapter not found (not plugged in?) - using the default input; monitoring muted".to_string());
+        warning = Some("No known guitar adapter found - using the default input, monitoring muted; pick your interface in Setup".to_string());
         shared.monitor_on.store(false, Ordering::Relaxed);
     }
     let input_is_pulse = in_label.contains("[pulseaudio:");

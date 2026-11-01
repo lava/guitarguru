@@ -14,7 +14,11 @@ use realfft::num_complex::Complex;
 use realfft::{ComplexToReal, RealFftPlanner, RealToComplex};
 use serde::{Deserialize, Serialize};
 
-pub const DEFAULT_ASSET_DIR: &str = "tones";
+/// Where the amp model and cab IRs are looked for unless the config says otherwise: a
+/// `tones` folder in the data dir (see the README for the files).
+pub fn default_asset_dir() -> PathBuf {
+    crate::progress::data_dir().join("tones")
+}
 
 /// The guitar sound.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,7 +98,7 @@ impl Default for ToneSettings {
     fn default() -> Self {
         Self {
             preset: SoundPreset::Heavy,
-            asset_dir: PathBuf::from(DEFAULT_ASSET_DIR),
+            asset_dir: default_asset_dir(),
             input_gain_db: 3.0,
             gate_db: -55.0,
             output_db: -6.0,
@@ -645,7 +649,7 @@ mod tests {
     /// heavy, and a crunch drive sweep (loudness and THD of a 110 Hz sine at the takes'
     /// typical attack level). Renders go to `GG_RENDER_DIR` if set.
     #[test]
-    #[ignore = "needs DI takes and the NAMix asset directory; prints preset loudness"]
+    #[ignore = "needs DI takes and the tone files (see README); prints preset loudness"]
     fn preset_loudness() {
         let paths = std::env::var("GG_DI_WAVS").expect("GG_DI_WAVS");
         let mut di = Vec::new();
@@ -721,7 +725,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "needs the NAMix asset directory; prints NAM CPU cost"]
+    #[ignore = "needs the tone files (see README); prints NAM CPU cost"]
     fn nam_cpu_cost() {
         let s = ToneSettings::default();
         let mut chain = Chain::build(&s, 48000);
