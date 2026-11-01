@@ -62,6 +62,7 @@ pub const SONGS: &[Song] = &[
     run(80, "Alcest", "Autre Temps", "", S16 | TREM, B),
     run(80, "Spiritbox", "Holy Roller", "the main riff", SYNC | PM, A),
     run(80, "Metallica", "Sad But True", "the main riff", PM | S16 | LH, A),
+    run(80, "Korn", "Blind", "the main riff (92 BPM)", PM | SYNC, B),
     // 100
     drill(100, "Deftones", "My Own Summer (Shove It)", "the main riff", "alt_eighths", B),
     run(100, "Amon Amarth", "Guardians of Asgaard", "", PM | LH, B),
