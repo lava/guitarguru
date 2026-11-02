@@ -2,6 +2,8 @@
 
 ![The main menu: the tempo ladder from 40 to 200 BPM, the run options and the guru](docs/screenshot.png)
 
+![Playing a riff: the current bar as tab with pick-direction marks and a palm-mute bracket, the next bar below](docs/riff.png)
+
 Rhythm guitar practice for an electric guitar plugged into the computer. You play
 along to a click; afterwards the app scores your timing and the evenness of your
 strokes, and lets you listen back to the weakest passages.
