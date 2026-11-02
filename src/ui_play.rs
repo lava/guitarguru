@@ -59,7 +59,9 @@ pub fn draw(g: &mut Game, p: &mut Paint, imgs: &MascotImages) {
                 crate::patterns::LevelKind::Riff(_) => vec![play.level.name()],
             }
         };
-        p.label_at(284.0, 58.0, &sub.join(" \u{b7} "), Align::Left, col::DIM);
+        // After the tempo: about 21 px per digit at this size.
+        let sub_x = 242.0 + 21.0 * bpm.to_string().len() as f32;
+        p.label_at(sub_x, 58.0, &sub.join(" \u{b7} "), Align::Left, col::DIM);
         let bar_no = ((t - start) / bar_s).floor() as i64 + 1;
         let bars = if t < start || waiting { "\u{2013}".to_string() } else { format!("{} / {}", bar_no.min(i64::from(play.plan.scored_bars)), play.plan.scored_bars) };
         let rem = if waiting { (total - start) as u32 } else { (total - t.max(start)).max(0.0) as u32 };
